@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check if authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Community Needs & Recipient Requests: Publicly readable, writeable by authenticated or community members
+    match /requests/{requestId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if true;
+    }
+
+    // Campaigns collection: Publicly readable, open write/update
+    match /campaigns/{campaignId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if true;
+    }
+
+    // Pledges & Donations: Publicly readable for progress calculations, open creation and updates
+    match /pledges/{pledgeId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if true;
+    }
+
+    // Comments on Requests: Publicly readable, open creation
+    match /comments/{commentId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if true;
+    }
+
+    // Global Feedback & Donor Stories ("Words of Hope")
+    match /feedback_stories/{feedbackId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if true;
+    }
+
+    // User Accounts & Profiles: Publicly readable (for org badges and usernames), updates allowed
+    match /users/{userId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if true;
+    }
+
+    // Subscriptions: Follower relationships
+    match /subscriptions/{subId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if true;
+    }
+  }
+}

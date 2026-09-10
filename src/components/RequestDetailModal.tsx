@@ -15,14 +15,20 @@ import {
   Building2,
   Sparkles
 } from "lucide-react";
-import { RecipientRequest, RequestUpdate, RequestComment } from "../types";
-import { getBadgesForRequest, BADGE_COLOR_MAP, isEmergencyOrUrgent } from "./AppNeeds";
+import { RecipientRequest, RequestUpdate, RequestComment, formatCapitalizedTitle, formatRequestPostedDate } from "../types";
+import { getBadgesForRequest, BADGE_COLOR_MAP, isEmergencyRequest } from "./AppNeeds";
+import { subscribeToRequestComments, addCommentToCloud } from "../lib/cloudService";
+import { ReceiverProfileWindow } from "./ReceiverProfileWindow";
+import { resolveReceiverProfile } from "../lib/receiverProfileHelper";
+import { SEED_DELIVERY_PACKAGES } from "../data/seedDatabase";
+import { getDeliveryProgress, getStoredDeliveryPackages } from "../lib/deliveryProgress";
 
 interface RequestDetailModalProps {
   request: RecipientRequest | null;
   isOpen: boolean;
   onClose: () => void;
   onAddToDonateBox: (req: RecipientRequest) => void;
+  onRemoveFromDonateBox?: (req: RecipientRequest) => void;
   onSupportNow: (req: RecipientRequest) => void;
   isInDonateBox: boolean;
   onShare?: (req: RecipientRequest) => void;
@@ -34,6 +40,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
   isOpen,
   onClose,
   onAddToDonateBox,
+  onRemoveFromDonateBox,
   onSupportNow,
   isInDonateBox,
   onShare,
@@ -45,22 +52,78 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
   const images = request.images && request.images.length > 0 ? request.images : [request.imageUrl];
   const [activeImageIndex, setActiveImageIndex] = useState(0);
 
+  // Side-by-side Receiver Profile Window State
+  const [showReceiverProfile, setShowReceiverProfile] = useState(false);
+
+  // Current User Sync for Community Comments & Profile Photo Propagation
+  const [currentUser, setCurrentUser] = useState<any>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem("aidstory_current_user");
+        if (saved) return JSON.parse(saved);
+      } catch (e) {}
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    const handleUserUpdate = () => {
+      if (typeof window !== "undefined") {
+        try {
+          const saved = localStorage.getItem("aidstory_current_user");
+          if (saved) setCurrentUser(JSON.parse(saved));
+        } catch (e) {}
+      }
+    };
+    window.addEventListener("aidstory_user_updated", handleUserUpdate);
+    window.addEventListener("storage", handleUserUpdate);
+    return () => {
+      window.removeEventListener("aidstory_user_updated", handleUserUpdate);
+      window.removeEventListener("storage", handleUserUpdate);
+    };
+  }, []);
+
+  // Resolved receiver profile matching "Your Account Profile" exactly
+  const receiverProfile = resolveReceiverProfile(request, currentUser);
+
   // Subscribe State
-  const [isSubscribed, setIsSubscribed] = useState(() => {
+  const [isSubscribed, setIsSubscribed] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
       const subs = localStorage.getItem("aidstory_subscribed_organizers");
       if (subs) {
         try {
           const list = JSON.parse(subs);
-          return list.includes(request.organizerName || request.authorName || "WeAreCharity1");
+          return list.includes(receiverProfile.name) || list.includes(request.organizerName || request.authorName || "");
         } catch (e) {}
       }
     }
     return false;
   });
 
+  // Sync subscribe status across components
+  useEffect(() => {
+    const handleSyncSubs = () => {
+      if (typeof window !== "undefined") {
+        try {
+          const subs = localStorage.getItem("aidstory_subscribed_organizers");
+          if (subs) {
+            const list = JSON.parse(subs);
+            setIsSubscribed(list.includes(receiverProfile.name) || list.includes(request.organizerName || request.authorName || ""));
+          }
+        } catch (e) {}
+      }
+    };
+    window.addEventListener("aidstory_subscribers_updated", handleSyncSubs);
+    window.addEventListener("storage", handleSyncSubs);
+    return () => {
+      window.removeEventListener("aidstory_subscribers_updated", handleSyncSubs);
+      window.removeEventListener("storage", handleSyncSubs);
+    };
+  }, [receiverProfile.name, request.organizerName, request.authorName]);
+
   const handleToggleSubscribe = () => {
-    const org = request.organizerName || request.authorName || "WeAreCharity1";
+    if (receiverProfile.isCurrentUser) return;
+    const org = receiverProfile.name;
     setIsSubscribed((prev) => {
       const next = !prev;
       try {
@@ -68,53 +131,19 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
         let list: string[] = subs ? JSON.parse(subs) : [];
         if (next) {
           if (!list.includes(org)) list.push(org);
+          if (request.organizerName && !list.includes(request.organizerName)) list.push(request.organizerName);
         } else {
-          list = list.filter((item) => item !== org);
+          list = list.filter((item) => item !== org && item !== request.organizerName);
         }
         localStorage.setItem("aidstory_subscribed_organizers", JSON.stringify(list));
+        window.dispatchEvent(new Event("aidstory_subscribers_updated"));
       } catch (e) {}
       return next;
     });
   };
 
-  // Updates Timeline State
-  const defaultUpdates: RequestUpdate[] = [
-    {
-      id: "up_1",
-      date: "3/5/2026",
-      text: "Currently, we receive some calls and pledges for these essentials. Thanks for all donor support!",
-      author: request.authorName || "Charity Coordinator"
-    },
-    {
-      id: "up_2",
-      date: "1/5/2026",
-      text: "Aid campaign officially opened for emergency distribution to local community centers.",
-      author: request.authorName || "Charity Coordinator"
-    }
-  ];
-
-  const [updates] = useState<RequestUpdate[]>(() => {
-    if (request.updates && request.updates.length > 0) return request.updates;
-    return defaultUpdates;
-  });
-
-  // Community Comments State
-  const defaultComments: RequestComment[] = [
-    {
-      id: "comm_1",
-      userName: "IamDonor1",
-      avatarUrl: "https://images.unsplash.com/photo-1517256064527-09c73fc73e38?auto=format&fit=crop&w=150&q=80",
-      comment: "Hope to hear your good news....",
-      date: "2h ago"
-    },
-    {
-      id: "comm_2",
-      userName: "IamDonor2",
-      avatarUrl: "https://images.unsplash.com/photo-1490750967868-88aa4486c946?auto=format&fit=crop&w=150&q=80",
-      comment: "Dropping off care packages this weekend. Sending prayers and love!",
-      date: "1h ago"
-    }
-  ];
+  // Show only updates and comments that were actually submitted for this request.
+  const updates: RequestUpdate[] = request.updates || [];
 
   const storageKey = `aidstory_req_comments_${request.id}`;
   const [comments, setComments] = useState<RequestComment[]>(() => {
@@ -124,37 +153,95 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
         if (saved) return JSON.parse(saved);
       } catch (e) {}
     }
-    return request.comments && request.comments.length > 0 ? request.comments : defaultComments;
+    return request.comments || [];
   });
+
+  // Subscribe in real-time to comments for this request
+  useEffect(() => {
+    if (!request.id) return;
+    const unsub = subscribeToRequestComments(request.id, (cloudComments) => {
+      if (cloudComments && cloudComments.length > 0) {
+        const mapped: RequestComment[] = cloudComments.map((c) => ({
+          id: c.id,
+          userName: c.authorName,
+          avatarUrl: c.authorAvatar || "",
+          comment: c.text,
+          date: c.createdAt ? new Date(c.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "Just now"
+        }));
+        setComments(mapped);
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(mapped));
+        } catch (e) {}
+      }
+    });
+    return () => unsub();
+  }, [request.id]);
 
   const [newCommentText, setNewCommentText] = useState("");
   const [showProgressTooltip, setShowProgressTooltip] = useState(false);
+
+  // Helper functions for user comment dynamic identity and uploaded avatar
+  const isUserComment = (comm: RequestComment) => {
+    if (comm.userName.startsWith("You")) return true;
+    if (currentUser?.username && comm.userName.toLowerCase() === currentUser.username.toLowerCase()) return true;
+    return false;
+  };
+
+  const getCommentDisplayName = (comm: RequestComment) => {
+    if (isUserComment(comm)) {
+      const name = currentUser?.username || "NGO01";
+      return `You (${name})`;
+    }
+    return comm.userName;
+  };
+
+  const getCommentAvatar = (comm: RequestComment) => {
+    if (isUserComment(comm)) {
+      return currentUser?.avatarUrl || currentUser?.profilePhoto || comm.avatarUrl || "";
+    }
+    return comm.avatarUrl || "";
+  };
 
   const handleSendComment = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!newCommentText.trim()) return;
 
+    const currentUserName = currentUser?.username || "NGO01";
+    const userAvatar = currentUser?.avatarUrl || currentUser?.profilePhoto || "";
+
     const newComment: RequestComment = {
       id: `comm_${Date.now()}`,
-      userName: "You (Donor)",
-      avatarUrl: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80",
+      userName: `You (${currentUserName})`,
+      avatarUrl: userAvatar,
       comment: newCommentText.trim(),
       date: "Just now"
     };
 
     const updated = [...comments, newComment];
     setComments(updated);
+    const sentText = newCommentText.trim();
     setNewCommentText("");
     try {
       localStorage.setItem(storageKey, JSON.stringify(updated));
     } catch (e) {}
+
+    // Save to Cloud Firestore
+    addCommentToCloud({
+      requestId: request.id,
+      authorName: currentUserName,
+      authorEmail: currentUser?.email || "",
+      authorAvatar: userAvatar,
+      text: sentText,
+      createdAt: new Date().toISOString()
+    }).catch((err) => console.warn("Cloud comment save failed:", err));
   };
 
   // Dynamic Progress Calculation matching Needs Card exactly
   const total = request.quantity || 1;
-  const pledged = request.pledgedQuantity || 0;
-  const done = Math.min(pledged, Math.max(0, Math.floor(pledged * 0.4)));
-  const inTransit = Math.max(0, pledged - done);
+  const { pledged, done, inTransit } = getDeliveryProgress(
+    request,
+    getStoredDeliveryPackages(SEED_DELIVERY_PACKAGES)
+  );
   const needed = Math.max(0, total - (done + inTransit));
 
   const donePct = Math.min(100, Math.round((done / total) * 100));
@@ -166,16 +253,130 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
 
   // Category & Urgency Badges (Unified with Request Cards)
   const badges = getBadgesForRequest(request);
-  const isEmergency = isEmergencyOrUrgent(request);
+  const isEmergency = isEmergencyRequest(request);
 
   const organizerDisplayName = request.organizerName || request.authorName || "WeAreCharity1";
+  const campaignName = request.campaignTitle || (request.campaignId ? "Campaign" : undefined);
   const brandName = request.brand || "Any brand";
   const colourName = request.color || "Any";
   const distance = request.distanceText || "5 km away from you";
 
+  // Identity normalization for comparing usernames/charity names (e.g. NGO01 vs NGO1 vs ngo-01)
+  const normalizeId = (val?: string) => {
+    if (!val) return "";
+    return val
+      .toLowerCase()
+      .trim()
+      .replace(/^(you\s*\(|\))/g, "")
+      .replace(/[^a-z0-9]/g, "")
+      .replace(/0+(\d)/g, "$1");
+  };
+
+  const currentUsernameNorm = normalizeId(currentUser?.username);
+  const currentCharityNorm = normalizeId(currentUser?.charityName);
+  const currentUserEmail = (currentUser?.email || "").toLowerCase().trim();
+
+  const authorEmail = (request.authorEmail || request.createdByUserEmail || "").toLowerCase().trim();
+  const authorNameNorm = normalizeId(request.authorName || request.createdByUsername);
+  const organizerNameNorm = normalizeId(request.organizerName);
+  const organizerDisplayNorm = normalizeId(organizerDisplayName);
+
+  // Check if organizer is the current logged-in user
+  const isOrganizerSameUser = Boolean(
+    currentUser && (
+      (currentUserEmail && authorEmail && currentUserEmail === authorEmail) ||
+      (currentUsernameNorm && (
+        currentUsernameNorm === organizerNameNorm ||
+        currentUsernameNorm === authorNameNorm ||
+        currentUsernameNorm === organizerDisplayNorm ||
+        (organizerNameNorm && organizerNameNorm.includes(currentUsernameNorm)) ||
+        (organizerNameNorm && currentUsernameNorm.includes(organizerNameNorm)) ||
+        (organizerDisplayNorm && organizerDisplayNorm.includes(currentUsernameNorm)) ||
+        (organizerDisplayNorm && currentUsernameNorm.includes(organizerDisplayNorm))
+      )) ||
+      (currentCharityNorm && (
+        currentCharityNorm === organizerNameNorm ||
+        currentCharityNorm === organizerDisplayNorm ||
+        (organizerNameNorm && organizerNameNorm.includes(currentCharityNorm)) ||
+        (organizerNameNorm && currentCharityNorm.includes(organizerNameNorm))
+      ))
+    )
+  );
+
+  // Lookup in aidstory_users if available
+  const getRegisteredUserPhoto = (nameOrEmail: string) => {
+    if (typeof window === "undefined") return null;
+    try {
+      const users = JSON.parse(localStorage.getItem("aidstory_users") || "[]");
+      const norm = normalizeId(nameOrEmail);
+      const emailLower = nameOrEmail.toLowerCase().trim();
+      const found = users.find((u: any) =>
+        (u.email && u.email.toLowerCase().trim() === emailLower) ||
+        (u.username && normalizeId(u.username) === norm) ||
+        (u.charityName && normalizeId(u.charityName) === norm)
+      );
+      return found?.avatarUrl || found?.profilePhoto || null;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  const userAvatarPhoto = currentUser?.avatarUrl || currentUser?.profilePhoto || "";
+
+  // Resolve organizer avatar image / emoji
+  let resolvedOrganizerImage: string | null = null;
+  let resolvedOrganizerEmoji: string | null = null;
+
+  if (isOrganizerSameUser) {
+    const regSelf = getRegisteredUserPhoto(currentUser?.email || currentUser?.username || "");
+    if (userAvatarPhoto) {
+      resolvedOrganizerImage = userAvatarPhoto;
+    } else if (regSelf) {
+      resolvedOrganizerImage = regSelf;
+    } else if (
+      request.organizerAvatar &&
+      (request.organizerAvatar.startsWith("http") ||
+        request.organizerAvatar.startsWith("data:") ||
+        request.organizerAvatar.startsWith("blob:") ||
+        request.organizerAvatar.startsWith("/"))
+    ) {
+      resolvedOrganizerImage = request.organizerAvatar;
+    } else if (request.organizerAvatar) {
+      resolvedOrganizerEmoji = request.organizerAvatar;
+    }
+  } else {
+    // Check registered users for photo first to guarantee same user consistency across app
+    const regPhoto = getRegisteredUserPhoto(request.organizerName || request.authorName || organizerDisplayName);
+    if (
+      regPhoto &&
+      (regPhoto.startsWith("http") ||
+        regPhoto.startsWith("data:") ||
+        regPhoto.startsWith("blob:") ||
+        regPhoto.startsWith("/"))
+    ) {
+      resolvedOrganizerImage = regPhoto;
+    } else if (
+      request.organizerAvatar &&
+      (request.organizerAvatar.startsWith("http") ||
+        request.organizerAvatar.startsWith("data:") ||
+        request.organizerAvatar.startsWith("blob:") ||
+        request.organizerAvatar.startsWith("/"))
+    ) {
+      resolvedOrganizerImage = request.organizerAvatar;
+    } else if (request.organizerAvatar) {
+      resolvedOrganizerEmoji = request.organizerAvatar;
+    }
+  }
+
   return (
     <AnimatePresence>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 md:p-8 overflow-y-auto">
+      <motion.div 
+        key={`request-detail-modal-container-${request.id}`}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-y-auto"
+      >
         {/* Backdrop */}
         <motion.div
           initial={{ opacity: 0 }}
@@ -185,78 +386,102 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
           className="fixed inset-0 bg-black/80 backdrop-blur-md"
         />
 
-        {/* Modal Container */}
-        <motion.div
-          initial={{ opacity: 0, scale: 0.96, y: 15 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.96, y: 15 }}
-          transition={{ type: "spring", duration: 0.45 }}
-          className={`relative w-full max-w-5xl text-white rounded-2xl md:rounded-3xl border shadow-2xl z-10 max-h-[92vh] flex flex-col overflow-hidden my-auto transition-colors ${
-            isEmergency
-              ? "bg-[#541221] border-[#7a1b32]/60"
-              : "bg-[#1d4334] border-[#295c47]/60"
-          }`}
-        >
-          {/* TOP HEADER BAR */}
-          <div className="flex items-center justify-between px-5 sm:px-7 pt-5 pb-3 border-b border-white/10 shrink-0">
-            {/* Title */}
-            <h2 className="text-xl sm:text-2xl md:text-3xl font-serif italic font-bold tracking-tight text-white pr-4">
-              {request.title}
-            </h2>
+        {/* Side-by-Side Flex Container */}
+        <div className="relative z-10 flex flex-col lg:flex-row items-center lg:items-stretch justify-center gap-4 w-full max-w-[1440px] max-h-[94vh] my-auto">
+          {/* Modal Container: Request Details */}
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: 15 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 15 }}
+            transition={{ type: "spring", duration: 0.45 }}
+            className={`relative w-full ${
+              showReceiverProfile ? "lg:flex-1 lg:max-w-4xl" : "max-w-[1320px]"
+            } text-white rounded-2xl md:rounded-3xl border shadow-2xl z-10 max-h-[92vh] flex flex-col overflow-hidden transition-all duration-300 ${
+              isEmergency
+                ? "bg-[#541221] border-[#7a1b32]/60"
+                : "bg-[#1d4334] border-[#295c47]/60"
+            }`}
+          >
+            {/* TOP HEADER BAR */}
+            <div className="flex items-center justify-between px-5 sm:px-7 pt-5 pb-3 border-b border-white/10 shrink-0">
+              {/* Title */}
+              <h2 className="text-xl sm:text-2xl md:text-3xl font-serif italic font-bold tracking-tight text-white pr-4">
+                {formatCapitalizedTitle(request.title)}
+              </h2>
 
-            {/* Right Header Area: Organizer & Subscribe + Close */}
-            <div className="flex items-center gap-3 sm:gap-4 shrink-0">
-              {/* Organizer Badge */}
-              <div className="flex items-center gap-2 bg-black/25 px-2.5 py-1 rounded-full border border-white/15">
-                <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-[#f4efe5] text-[#2c221a] font-serif font-bold text-[10px] sm:text-xs flex items-center justify-center shadow">
-                  {request.organizerAvatar ? (
-                    <img
-                      src={request.organizerAvatar}
-                      alt={organizerDisplayName}
-                      className="w-full h-full rounded-full object-cover"
-                    />
+              {/* Right Header Area: Organizer & Subscribe + Close */}
+              <div className="flex items-center gap-3 sm:gap-4 shrink-0">
+                {/* Organizer Badge with Clickable Profile Photo */}
+                <div className="flex items-center gap-2 bg-black/25 px-2.5 py-1 rounded-full border border-white/15">
+                  <button
+                    type="button"
+                    onClick={() => setShowReceiverProfile((prev) => !prev)}
+                    className="w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-[#f4efe5] text-[#2c221a] font-serif font-bold text-[10px] sm:text-xs flex items-center justify-center shadow overflow-hidden shrink-0 cursor-pointer hover:ring-2 hover:ring-emerald-400 hover:scale-105 active:scale-95 transition-all"
+                    title="Click to view receiver profile and details"
+                  >
+                    {receiverProfile.avatarUrl ? (
+                      <img
+                        src={receiverProfile.avatarUrl}
+                        alt={receiverProfile.name}
+                        className="w-full h-full rounded-full object-cover"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-[9px] sm:text-[10px] font-bold bg-[#c5dc80] text-[#2c221a]">
+                        {receiverProfile.initials}
+                      </div>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowReceiverProfile((prev) => !prev)}
+                    className="text-xs sm:text-sm font-medium text-white/90 hover:text-emerald-300 truncate max-w-[110px] sm:max-w-[150px] cursor-pointer text-left transition-colors"
+                    title="Click to view receiver details"
+                  >
+                    {receiverProfile.name}
+                  </button>
+
+                  {/* Yellow Subscribe Button or You indicator if own request */}
+                  {receiverProfile.isCurrentUser ? (
+                    <span className="text-[10px] sm:text-xs font-semibold px-2.5 py-0.5 rounded-full bg-white/15 text-amber-200 border border-amber-300/30">
+                      You
+                    </span>
                   ) : (
-                    <span>❤️</span>
+                    <button
+                      type="button"
+                      onClick={handleToggleSubscribe}
+                      className={`text-[10px] sm:text-xs font-bold font-mono px-3 py-1 rounded-full transition-all cursor-pointer shadow ${
+                        isSubscribed
+                          ? "bg-white/20 text-white border border-white/30"
+                          : "bg-[#facc15] hover:bg-[#eab308] text-black active:scale-95"
+                      }`}
+                    >
+                      {isSubscribed ? "subscribed ✓" : "subscribe"}
+                    </button>
                   )}
                 </div>
-                <span className="text-xs sm:text-sm font-medium text-white/90 truncate max-w-[110px] sm:max-w-[150px]">
-                  {organizerDisplayName}
-                </span>
 
-                {/* Yellow Subscribe Button */}
+                {/* Close Button */}
                 <button
                   type="button"
-                  onClick={handleToggleSubscribe}
-                  className={`text-[10px] sm:text-xs font-bold font-mono px-3 py-1 rounded-full transition-all cursor-pointer shadow ${
-                    isSubscribed
-                      ? "bg-white/20 text-white border border-white/30"
-                      : "bg-[#facc15] hover:bg-[#eab308] text-black active:scale-95"
-                  }`}
+                  onClick={onClose}
+                  className="w-9 h-9 rounded-full bg-black/30 hover:bg-black/50 text-white/80 hover:text-white flex items-center justify-center transition-colors cursor-pointer border border-white/10"
+                  title="Close"
                 >
-                  {isSubscribed ? "subscribed ✓" : "subscribe"}
+                  <X className="w-5 h-5" />
                 </button>
               </div>
-
-              {/* Close Button */}
-              <button
-                type="button"
-                onClick={onClose}
-                className="w-9 h-9 rounded-full bg-black/30 hover:bg-black/50 text-white/80 hover:text-white flex items-center justify-center transition-colors cursor-pointer border border-white/10"
-                title="Close"
-              >
-                <X className="w-5 h-5" />
-              </button>
             </div>
-          </div>
 
           {/* MAIN SCROLLABLE CONTENT (TWO COLUMNS) */}
-          <div className="flex-1 overflow-y-auto p-5 sm:p-7 space-y-6 md:space-y-0 md:grid md:grid-cols-12 md:gap-7">
+          <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-6 md:space-y-0 md:grid md:grid-cols-12 md:gap-6">
             
-            {/* LEFT COLUMN: Media, Tags, Description, Progress & Map (7 Cols) */}
-            <div className="md:col-span-7 space-y-5 text-left">
+            {/* LEFT COLUMN: Media, Tags, Description, Progress & Map (8 Cols) */}
+            <div className="md:col-span-8 space-y-5 text-left">
               
               {/* 1. Large Image Carousel */}
-              <div className="relative w-full h-64 sm:h-72 md:h-80 bg-black/40 rounded-2xl overflow-hidden border border-white/15 shadow-inner group">
+              <div className="relative w-full h-52 sm:h-56 md:h-60 bg-black/40 rounded-2xl overflow-hidden border border-white/15 shadow-inner group">
                 <img
                   src={images[activeImageIndex] || request.imageUrl}
                   alt={request.title}
@@ -326,11 +551,19 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                 </button>
               </div>
 
+              {/* 3–5. Compact request summary beside progress and location */}
+              <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,3fr)_minmax(260px,2fr)] gap-4 lg:gap-5 items-start">
               {/* 3. Specifications & Description */}
-              <div className="space-y-1.5 text-xs text-[#f4efe5]/90 leading-relaxed bg-black/20 p-4 rounded-xl border border-white/10">
+              <div className="space-y-1.5 text-xs text-[#f4efe5]/90 leading-relaxed bg-black/20 p-4 sm:p-5 rounded-xl border border-white/10">
                 <div className="text-[10px] font-mono text-white/60 font-semibold uppercase tracking-wider">
-                  posted {request.postedDate || "2 DAYS AGO"}
+                  posted {formatRequestPostedDate(request.postedDate, request.postedTimestamp)}
                 </div>
+                {campaignName && (
+                  <div className="font-mono text-[11px]">
+                    <span className="text-white/70">Campaign Name: </span>
+                    <span className="text-white font-semibold">{campaignName}</span>
+                  </div>
+                )}
                 <div className="font-mono text-[11px]">
                   <span className="text-white/70">Brand: </span>
                   <span className="text-white font-semibold">{brandName}</span>
@@ -344,6 +577,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                 </p>
               </div>
 
+              <div className="space-y-3">
               {/* 4. CAMPAIGN PROGRESS */}
               <div className="space-y-1.5 pt-1 relative">
                 <div className="flex items-center justify-between text-xs">
@@ -417,7 +651,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                 </div>
 
                 {/* Stylized Interactive Map graphic */}
-                <div className="relative h-28 w-full rounded-xl overflow-hidden border border-white/20 shadow-inner bg-[#457b9d]/30 flex items-center justify-center">
+                <div className="relative h-24 sm:h-28 w-full rounded-xl overflow-hidden border border-white/20 shadow-inner bg-[#457b9d]/30 flex items-center justify-center">
                   {/* Realistic Topographic Map Visual Background */}
                   <div 
                     className="absolute inset-0 bg-cover bg-center opacity-85"
@@ -436,22 +670,24 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                   </div>
                 </div>
               </div>
+              </div>
+              </div>
 
             </div>
 
-            {/* RIGHT COLUMN: Updates & Community (5 Cols) */}
-            <div className="md:col-span-5 flex flex-col justify-between space-y-6 text-left border-t md:border-t-0 md:border-l md:border-white/15 md:pl-7 pt-4 md:pt-0">
+            {/* RIGHT COLUMN: Updates & Community (4 Cols) */}
+            <div className="md:col-span-4 flex flex-col space-y-4 sm:space-y-5 text-left border-t md:border-t-0 md:border-l md:border-white/15 md:pl-5 lg:pl-6 pt-4 md:pt-0">
               
               {/* UPDATES SECTION */}
-              <div className="space-y-3">
-                <h3 className="text-xl font-serif font-bold text-white flex items-center gap-2">
+              <div className="space-y-2.5">
+                <h3 className="text-lg sm:text-xl font-serif font-bold text-white flex items-center gap-2">
                   Updates
                 </h3>
 
                 {/* Timeline with orange line & yellow node dots */}
-                <div className="relative pl-6 space-y-4 before:absolute before:left-2 before:top-2 before:bottom-2 before:w-0.5 before:bg-[#f97316]">
+                <div className="relative pl-6 space-y-3 before:absolute before:left-2 before:top-2 before:bottom-2 before:w-0.5 before:bg-[#f97316]">
                   {updates.map((up) => (
-                    <div key={up.id} className="relative space-y-1">
+                    <div key={up.id} className="relative space-y-0.5">
                       {/* Node Dot */}
                       <div className="absolute -left-6 top-1 w-3.5 h-3.5 rounded-full bg-[#facc15] border-2 border-[#314638] shadow" />
                       
@@ -466,56 +702,58 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                 </div>
               </div>
 
-              {/* COMMUNITY SECTION (LIVE CHAT BUBBLES) */}
-              <div className="space-y-3 pt-2 flex-1 flex flex-col justify-end">
-                <h3 className="text-xl font-serif font-bold text-white">
+              {/* COMMUNITY SECTION (LIVE CHAT BUBBLES) - Sits directly below Updates without large empty space */}
+              <div className="space-y-2.5 pt-1">
+                <h3 className="text-lg sm:text-xl font-serif font-bold text-white">
                   Community
                 </h3>
 
                 {/* Scrollable comments stream */}
-                <div className="space-y-3 max-h-56 overflow-y-auto pr-1">
-                  {comments.map((comm) => (
-                    <div key={comm.id} className="flex items-start gap-2.5">
-                      {/* Avatar */}
-                      <div className="w-8 h-8 rounded-full overflow-hidden bg-black/40 border border-white/20 shrink-0">
-                        {comm.avatarUrl ? (
-                          <img
-                            src={comm.avatarUrl}
-                            alt={comm.userName}
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-xs font-bold bg-amber-600 text-white">
-                            {comm.userName[0]}
+                <div className="space-y-2.5 max-h-60 sm:max-h-72 overflow-y-auto pr-1">
+                  {comments.map((comm) => {
+                    const avatar = getCommentAvatar(comm);
+                    const displayName = getCommentDisplayName(comm);
+                    const isSelf = isUserComment(comm);
+
+                    return (
+                      <div key={comm.id} className="flex items-start gap-2.5">
+                        {/* Avatar */}
+                        <div className="w-8 h-8 rounded-full overflow-hidden bg-black/40 border border-white/20 shrink-0 flex items-center justify-center">
+                          {avatar ? (
+                            <img
+                              src={avatar}
+                              alt={displayName}
+                              className="w-full h-full object-cover"
+                              referrerPolicy="no-referrer"
+                            />
+                          ) : isSelf ? (
+                            <div className="w-full h-full flex items-center justify-center text-[10px] font-bold bg-[#c5dc80] text-[#2c221a]">
+                              {currentUser?.username ? currentUser.username.substring(0, 2).toUpperCase() : "ME"}
+                            </div>
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-xs font-bold bg-amber-600 text-white">
+                              {comm.userName[0]}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Content Bubble */}
+                        <div className="space-y-0.5 max-w-[85%]">
+                          <div className="text-[10px] font-mono font-bold text-white/80 pl-1">
+                            {displayName}
                           </div>
-                        )}
-                      </div>
-
-                      {/* Content Bubble */}
-                      <div className="space-y-0.5 max-w-[85%]">
-                        <div className="text-[10px] font-mono font-bold text-white/80 pl-1">
-                          {comm.userName}
-                        </div>
-                        <div className="bg-[#5eb5a0] text-[#0d2a22] font-medium text-xs px-3.5 py-2 rounded-2xl rounded-tl-sm shadow-md leading-snug">
-                          {comm.comment}
+                          <div className="bg-[#5eb5a0] text-[#0d2a22] font-medium text-xs px-3.5 py-2 rounded-2xl rounded-tl-sm shadow-md leading-snug">
+                            {comm.comment}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
 
-                  {/* Typing placeholder bubble */}
-                  <div className="flex items-start gap-2.5 opacity-60">
-                    <div className="w-8 h-8 rounded-full bg-black/30 border border-white/10 flex items-center justify-center shrink-0">
-                      <User className="w-4 h-4 text-white/60" />
-                    </div>
-                    <div className="bg-[#5eb5a0]/40 text-[#0d2a22] text-xs px-3 py-1.5 rounded-2xl rounded-tl-sm">
-                      <span className="animate-pulse">...</span>
-                    </div>
-                  </div>
                 </div>
 
                 {/* Comment Input Box */}
-                <form onSubmit={handleSendComment} className="pt-2">
+                <form onSubmit={handleSendComment} className="pt-1.5">
                   <div className="relative flex items-center bg-[#f4efe5] rounded-full p-1.5 shadow-md">
                     <input
                       type="text"
@@ -545,13 +783,14 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
 
           {/* BOTTOM ACTION FOOTER BAR (TWO LARGE MINT BUTTONS) */}
           <div className="px-5 sm:px-7 py-4 bg-black/25 border-t border-white/10 flex flex-col sm:flex-row items-center gap-3 shrink-0">
-            {/* 1. ADD TO DONATE BOX / VIEW DONATE BOX */}
+            {/* 1. ADD TO DONATE BOX / REMOVE FROM DONATE BOX */}
             <button
               type="button"
               onClick={() => {
-                if (isInDonateBox && onOpenDonateBoxPage) {
-                  onClose();
-                  onOpenDonateBoxPage();
+                if (isInDonateBox) {
+                  if (onRemoveFromDonateBox) {
+                    onRemoveFromDonateBox(request);
+                  }
                 } else {
                   onAddToDonateBox(request);
                 }
@@ -563,7 +802,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
               }`}
             >
               <Package className="w-4 h-4" />
-              <span>{isInDonateBox ? "VIEW IN DONATE BOX →" : "ADD TO DONATE BOX"}</span>
+              <span>{isInDonateBox ? "REMOVE FROM DONATE BOX" : "ADD TO DONATE BOX"}</span>
             </button>
 
             {/* 2. SUPPORT NOW */}
@@ -580,8 +819,21 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
             </button>
           </div>
 
-        </motion.div>
-      </div>
+          </motion.div>
+
+          {/* Side-by-Side Receiver Profile Window */}
+          <AnimatePresence>
+            {showReceiverProfile && (
+              <ReceiverProfileWindow
+                request={request}
+                onClose={() => setShowReceiverProfile(false)}
+                isEmergency={isEmergency}
+                currentUser={currentUser}
+              />
+            )}
+          </AnimatePresence>
+        </div>
+      </motion.div>
     </AnimatePresence>
   );
 };

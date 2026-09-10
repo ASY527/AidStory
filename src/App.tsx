@@ -18,15 +18,59 @@ import AppMainMenu from "./components/AppMainMenu";
 import AppYourRequest from "./components/AppYourRequest";
 import AppNeeds from "./components/AppNeeds";
 import AppPreparingDonateBox from "./components/AppPreparingDonateBox";
+import AppDeliveryStatus from "./components/AppDeliveryStatus";
+import { subscribeToFeedbackComments, addFeedbackCommentToCloud, initializeSeedDatabase } from "./lib/cloudService";
+import { getUserFromCloud } from "./lib/cloudService";
+import { auth } from "./lib/firebase";
+import { onAuthStateChanged } from "firebase/auth";
 
 export default function App() {
   const [activeModal, setActiveModal] = useState<ModalType>(null);
-  const [currentView, setCurrentView] = useState<"home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box">(() => {
+
+  // Initialize seed database on app mount
+  useEffect(() => {
+    initializeSeedDatabase().catch((err) => {
+      console.warn("Auto-seeding check failed:", err);
+    });
+  }, []);
+
+  // Firebase restores the authenticated session after a reload. The matching
+  // profile is then restored into the app's existing user state cache.
+  useEffect(() => {
+    let isInitialAuthenticationCheck = true;
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (!isInitialAuthenticationCheck) return;
+      isInitialAuthenticationCheck = false;
+      if (!firebaseUser?.email) return;
+
+      void (async () => {
+        const email = firebaseUser.email!.toLowerCase();
+        const cloudProfile = await getUserFromCloud(email);
+        const profile = cloudProfile as any;
+        const restoredUser = {
+          ...(profile || {}),
+          uid: firebaseUser.uid,
+          username: profile?.username || firebaseUser.displayName || email.split("@")[0],
+          email,
+          role: profile?.role || "donor",
+          isVerified: profile?.isVerified || false,
+          joinedDate: profile?.joinedDate || firebaseUser.metadata.creationTime || new Date().toISOString(),
+        };
+        localStorage.setItem("aidstory_current_user", JSON.stringify(restoredUser));
+        setCurrentView("main_menu");
+        window.location.hash = "main-menu";
+        document.title = "Main Menu - AidStory";
+      })();
+    });
+    return () => unsubscribe();
+  }, []);
+  const [currentView, setCurrentView] = useState<"home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box" | "delivery_status">(() => {
     if (typeof window !== "undefined") {
       const storedUser = localStorage.getItem("aidstory_current_user");
       if (window.location.hash === "#needs") return "needs";
       if (window.location.hash === "#your-request") return "your_request";
       if (window.location.hash === "#donate-box" || window.location.hash === "#preparing-donate-box") return "preparing_donate_box";
+      if (window.location.hash === "#delivery-status" || window.location.hash === "#delivery") return "delivery_status";
       if (storedUser) {
         return "main_menu";
       }
@@ -47,12 +91,15 @@ export default function App() {
     } else if (window.location.hash === "#donate-box" || window.location.hash === "#preparing-donate-box") {
       setCurrentView("preparing_donate_box");
       document.title = "Preparing your donate box - AidStory";
+    } else if (window.location.hash === "#delivery-status" || window.location.hash === "#delivery") {
+      setCurrentView("delivery_status");
+      document.title = "Delivery Status - AidStory";
     } else if (storedUser) {
       window.location.hash = "main-menu";
       document.title = "Main Menu - AidStory";
     } else {
       // Force reset hash to home page on load/reload only if NOT logged in
-      if (typeof window !== "undefined" && (window.location.hash === "#comments" || window.location.hash === "#explore" || window.location.hash === "#main-menu" || window.location.hash === "#your-request" || window.location.hash === "#needs" || window.location.hash === "#donate-box" || window.location.hash === "#preparing-donate-box")) {
+      if (typeof window !== "undefined" && (window.location.hash === "#comments" || window.location.hash === "#explore" || window.location.hash === "#main-menu" || window.location.hash === "#your-request" || window.location.hash === "#needs" || window.location.hash === "#donate-box" || window.location.hash === "#preparing-donate-box" || window.location.hash === "#delivery-status" || window.location.hash === "#delivery")) {
         if (window.history && window.history.replaceState) {
           window.history.replaceState(null, document.title, window.location.pathname + window.location.search);
         } else {
@@ -71,6 +118,8 @@ export default function App() {
         setCurrentView("explore");
       } else if (window.location.hash === "#donate-box" || window.location.hash === "#preparing-donate-box") {
         setCurrentView("preparing_donate_box");
+      } else if (window.location.hash === "#delivery-status" || window.location.hash === "#delivery") {
+        setCurrentView("delivery_status");
       } else if (window.location.hash === "#main-menu") {
         setCurrentView("main_menu");
       } else if (window.location.hash === "#your-request") {
@@ -87,7 +136,7 @@ export default function App() {
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
-  const navigateToView = (view: "home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box") => {
+  const navigateToView = (view: "home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box" | "delivery_status") => {
     setCurrentView(view);
     if (view === "needs") {
       window.location.hash = "needs";
@@ -107,6 +156,9 @@ export default function App() {
     } else if (view === "preparing_donate_box") {
       window.location.hash = "preparing-donate-box";
       document.title = "Preparing your donate box - AidStory";
+    } else if (view === "delivery_status") {
+      window.location.hash = "delivery-status";
+      document.title = "Delivery Status - AidStory";
     } else {
       window.location.hash = "";
       document.title = "AidStory";
@@ -120,19 +172,25 @@ export default function App() {
       try {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          // Filter out the legacy items with ID "1" or "2"
           return parsed.filter((item: any) => item.id !== "1" && item.id !== "2");
         }
-      } catch (e) {
-        // Fallback to empty array on parse error
-      }
+      } catch (e) {}
     }
     return [];
   });
 
+  // Subscribe to real-time feedback stories across devices
   useEffect(() => {
-    localStorage.setItem("aidstory_comments", JSON.stringify(feedbackList));
-  }, [feedbackList]);
+    const unsub = subscribeToFeedbackComments((cloudItems) => {
+      if (cloudItems && cloudItems.length > 0) {
+        setFeedbackList(cloudItems);
+        try {
+          localStorage.setItem("aidstory_comments", JSON.stringify(cloudItems));
+        } catch (e) {}
+      }
+    });
+    return () => unsub();
+  }, []);
 
   const handleAddComment = (name: string, email: string, comment: string) => {
     const newComment: FeedbackComment = {
@@ -147,6 +205,12 @@ export default function App() {
       })
     };
     setFeedbackList((prev) => [newComment, ...prev]);
+    addFeedbackCommentToCloud({
+      name,
+      email: email.trim() || "",
+      comment,
+      date: newComment.date
+    }).catch((e) => console.warn("Could not sync comment to cloud:", e));
   };
 
   return (
@@ -168,6 +232,8 @@ export default function App() {
         <AppNeeds navigateToView={navigateToView} />
       ) : currentView === "preparing_donate_box" ? (
         <AppPreparingDonateBox navigateToView={navigateToView} />
+      ) : currentView === "delivery_status" ? (
+        <AppDeliveryStatus navigateToView={navigateToView} />
       ) : (
         <AppExplore navigateToView={navigateToView} />
       )}
@@ -175,7 +241,13 @@ export default function App() {
       {/* INTERACTIVE PREVIEW MODALS (AnimatePresence) */}
       <AnimatePresence>
         {activeModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <motion.div 
+            key="app-active-modal-container"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          >
             {/* Modal Backdrop */}
             <motion.div 
               initial={{ opacity: 0 }}
@@ -418,7 +490,7 @@ export default function App() {
               )}
 
             </motion.div>
-          </div>
+          </motion.div>
         )}
       </AnimatePresence>
 

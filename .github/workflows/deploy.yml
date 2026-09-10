@@ -2,7 +2,7 @@ name: Deploy Vite Site to GitHub Pages
 
 on:
   push:
-    branches: ["main"] # Change to "master" if your default branch is master
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -28,13 +28,13 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: npm install
 
-      - name: Build Project
+      - name: Build project
         run: npm run build
 
-      - name: Upload Artifacts
+      - name: Upload artifacts
         uses: actions/upload-pages-artifact@v3
         with:
           path: './dist'

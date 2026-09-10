@@ -29,8 +29,25 @@ import {
   Boxes,
   Check
 } from "lucide-react";
-import { RecipientRequest, RequestCategory } from "../types";
+import { RecipientRequest, RequestCategory, formatCapitalizedTitle, formatRequestPostedDate } from "../types";
 import { RequestDetailModal } from "./RequestDetailModal";
+import {
+  subscribeToAllRequests,
+  subscribeToAllDeliveryPackages,
+  seedInitialRequestsIfEmpty,
+  updateRequestInCloud,
+  savePledgeToCloud
+} from "../lib/cloudService";
+import {
+  MASTER_COMMUNITY_REQUESTS,
+  STABLE_REQUEST_IMAGE_IDS,
+  getCharityLocationForRequest,
+  getAllMergedCommunityRequests,
+  broadcastCommunityRequestsUpdate
+} from "../data/allRequestsCatalog";
+import { SEED_DELIVERY_PACKAGES } from "../data/seedDatabase";
+import { getDeliveryProgress, getStoredDeliveryPackages } from "../lib/deliveryProgress";
+import type { DeliveryPackageItem } from "../types";
 
 export interface DonateBoxCartItem {
   id: string;
@@ -45,392 +62,18 @@ export interface DonateBoxCartItem {
 }
 
 interface AppNeedsProps {
-  navigateToView: (view: "home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box") => void;
+  navigateToView: (view: "home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box" | "delivery_status") => void;
 }
 
-// Initial seed requests that match the exact requests in the AidStory reference image
-export const DEFAULT_NEEDS_REQUESTS: RecipientRequest[] = [
-  {
-    id: "need_1",
-    title: "Campaign A - DOG'S FOODS",
-    category: "Animal",
-    categories: ["Animals", "Emergency", "Foods"],
-    description: "Urgent dry kibbles and canned meat required for 45 rescued shelter dogs following monsoon shelter flooding.",
-    imageUrl: "https://images.unsplash.com/photo-1589924691995-400dc9ecc119?auto=format&fit=crop&w=800&q=80",
-    images: [
-      "https://images.unsplash.com/photo-1589924691995-400dc9ecc119?auto=format&fit=crop&w=800&q=80",
-      "https://images.unsplash.com/photo-1601758228041-f3b2795255f1?auto=format&fit=crop&w=800&q=80"
-    ],
-    location: "Sibu, Sabah",
-    quantity: 10,
-    unit: "bags",
-    pledgedQuantity: 6,
-    organizerName: "Sibu Animal Hope Shelter (NGO)",
-    postedDate: "2 DAYS AGO",
-    postedTimestamp: Date.now() - 172800000,
-    status: "active",
-    campaignTitle: "Campaign A",
-    urgencyLevel: "emergency"
-  },
-  {
-    id: "need_9",
-    title: "Clean Drinking Water Cartons",
-    category: "Food",
-    categories: ["Foods", "Emergency"],
-    description: "Cartons of 1.5L mineral water bottles for relief distribution to displaced flood victims.",
-    imageUrl: "https://images.unsplash.com/photo-1548839140-29a749e1bc4e?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1548839140-29a749e1bc4e?auto=format&fit=crop&w=800&q=80"],
-    location: "Johor Bahru, Johor",
-    quantity: 40,
-    unit: "cartons",
-    pledgedQuantity: 28,
-    organizerName: "Johor Flood Relief Network (Charity)",
-    postedDate: "4 DAYS AGO",
-    postedTimestamp: Date.now() - 345600000,
-    status: "active",
-    urgencyLevel: "emergency"
-  },
-  {
-    id: "need_11",
-    title: "Water Filtration Kits & Boots",
-    category: "Emergency",
-    categories: ["Living Things", "Emergency", "Shoes"],
-    description: "Portable ceramic water gravity filters and safety rubber boots for rural river villages.",
-    imageUrl: "https://images.unsplash.com/photo-1509316975850-ff9c5deb0cd9?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1509316975850-ff9c5deb0cd9?auto=format&fit=crop&w=800&q=80"],
-    location: "Kuching, Sarawak",
-    quantity: 15,
-    unit: "kits",
-    pledgedQuantity: 9,
-    organizerName: "Sarawak Rural Safe Water Mission (NGO)",
-    postedDate: "5 DAYS AGO",
-    postedTimestamp: Date.now() - 432000000,
-    status: "active",
-    urgencyLevel: "emergency"
-  },
-  {
-    id: "need_2",
-    title: "BABY PAMPERS",
-    category: "Others",
-    categories: ["Baby", "Personal Care", "Living Things"],
-    description: "Diapers size M and L for 13 infant families in local community daycare centers.",
-    imageUrl: "https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?auto=format&fit=crop&w=800&q=80",
-    images: [
-      "https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?auto=format&fit=crop&w=800&q=80"
-    ],
-    location: "Bangsar, KL",
-    quantity: 13,
-    unit: "packs",
-    pledgedQuantity: 10,
-    organizerName: "Bangsar Infant Care Relief (Charity)",
-    postedDate: "3 DAYS AGO",
-    postedTimestamp: Date.now() - 259200000,
-    status: "active",
-    urgencyLevel: "medium"
-  },
-  {
-    id: "need_3",
-    title: "Campaign B - STORYBOOKS",
-    category: "Education",
-    categories: ["Books", "Education", "Child"],
-    description: "Illustrated moral storybooks and early reading sets for community kindergarten learning library.",
-    imageUrl: "https://images.unsplash.com/photo-1512820790803-83ca734da794?auto=format&fit=crop&w=800&q=80",
-    images: [
-      "https://images.unsplash.com/photo-1512820790803-83ca734da794?auto=format&fit=crop&w=800&q=80"
-    ],
-    location: "Sibu, Sabah",
-    quantity: 10,
-    unit: "sets",
-    pledgedQuantity: 6,
-    organizerName: "Sibu Community Kindergarten (NGO)",
-    postedDate: "2 DAYS AGO",
-    postedTimestamp: Date.now() - 172800000,
-    status: "active",
-    campaignTitle: "Campaign B",
-    urgencyLevel: "medium"
-  },
-  {
-    id: "need_4",
-    title: "Campaign A - Lego for Kids",
-    category: "Others",
-    categories: ["Toys", "Child", "Education"],
-    description: "Creative building brick kits and classic Lego blocks for children trauma relief workshops.",
-    imageUrl: "https://images.unsplash.com/photo-1587654780291-39c9404d746b?auto=format&fit=crop&w=800&q=80",
-    images: [
-      "https://images.unsplash.com/photo-1587654780291-39c9404d746b?auto=format&fit=crop&w=800&q=80"
-    ],
-    location: "Sibu, Sabah",
-    quantity: 10,
-    unit: "boxes",
-    pledgedQuantity: 5,
-    organizerName: "Kids Hope Workshop Foundation (NGO)",
-    postedDate: "2 DAYS AGO",
-    postedTimestamp: Date.now() - 172800000,
-    status: "active",
-    campaignTitle: "Campaign A",
-    urgencyLevel: "standard"
-  },
-  {
-    id: "need_5",
-    title: "Canned Food & Provisions",
-    category: "Food",
-    categories: ["Foods", "Living Things"],
-    description: "Assorted canned soups, baked beans, tomato puree, and canned fish for family meal packs.",
-    imageUrl: "https://images.unsplash.com/photo-1534483509719-3feaee7c30da?auto=format&fit=crop&w=800&q=80",
-    images: [
-      "https://images.unsplash.com/photo-1534483509719-3feaee7c30da?auto=format&fit=crop&w=800&q=80"
-    ],
-    location: "Sibu, Sabah",
-    quantity: 10,
-    unit: "cans",
-    pledgedQuantity: 6,
-    organizerName: "Sibu Relief Food Bank (NGO)",
-    postedDate: "2 DAYS AGO",
-    postedTimestamp: Date.now() - 172800000,
-    status: "active",
-    urgencyLevel: "medium"
-  },
-  {
-    id: "need_6",
-    title: "Blankets & Towel Request",
-    category: "Clothing",
-    categories: ["Clothing", "Textiles", "Household"],
-    tags: ["Household", "Daily Use", "Not Emergency"],
-    brand: "Any brand",
-    color: "Any",
-    organizerName: "WeAreCharity1 (NGO)",
-    organizerAvatar: "https://images.unsplash.com/photo-1544027993-37dbfe43562a?auto=format&fit=crop&w=150&q=80",
-    distanceText: "5 km away from you",
-    description: "Urgent need for comfortable fleece blankets, cotton bedsheets, and bath towels to assist night shelter occupants and nursing home elderly in Sibu, Sabah.",
-    imageUrl: "https://images.unsplash.com/photo-1584100936595-c0654b55a2e2?auto=format&fit=crop&w=800&q=80",
-    images: [
-      "https://images.unsplash.com/photo-1584100936595-c0654b55a2e2?auto=format&fit=crop&w=800&q=80",
-      "https://images.unsplash.com/photo-1616627547584-bf28cee262db?auto=format&fit=crop&w=800&q=80",
-      "https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=800&q=80"
-    ],
-    location: "Sibu, Sabah",
-    quantity: 10,
-    unit: "pieces",
-    pledgedQuantity: 3,
-    postedDate: "2 DAYS AGO",
-    postedTimestamp: Date.now() - 172800000,
-    status: "active",
-    urgencyLevel: "medium",
-    updates: [
-      {
-        id: "up_6_1",
-        date: "3/5/2026",
-        text: "Currently, we receive some calls and messages for these essentials. Thanks for all donor support!",
-        author: "WeAreCharity1 (NGO)"
-      },
-      {
-        id: "up_6_2",
-        date: "1/5/2026",
-        text: "Aid campaign opened for emergency night shelter winter and thermal provisions.",
-        author: "WeAreCharity1 (NGO)"
-      }
-    ],
-    comments: [
-      {
-        id: "comm_6_1",
-        userName: "IamDonor1",
-        avatarUrl: "https://images.unsplash.com/photo-1517256064527-09c73fc73e38?auto=format&fit=crop&w=150&q=80",
-        comment: "Hope to hear your good news....",
-        date: "2h ago"
-      },
-      {
-        id: "comm_6_2",
-        userName: "IamDonor2",
-        avatarUrl: "https://images.unsplash.com/photo-1490750967868-88aa4486c946?auto=format&fit=crop&w=150&q=80",
-        comment: "Pledged 2 sets of warm blankets! Will drop them off this Friday.",
-        date: "1h ago"
-      }
-    ]
-  },
-  {
-    id: "need_6b",
-    title: "Warm Winter Jackets & Sweaters",
-    category: "Clothing",
-    categories: ["Clothing", "Textiles"],
-    description: "Cold weather jackets, sweaters, and fleece jumpers for displaced flood shelter families.",
-    imageUrl: "https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=800&q=80"],
-    location: "Shah Alam, Selangor",
-    quantity: 20,
-    unit: "jackets",
-    pledgedQuantity: 14,
-    organizerName: "Shah Alam Disaster Relief (Charity)",
-    postedDate: "1 DAY AGO",
-    postedTimestamp: Date.now() - 86400000,
-    status: "active",
-    urgencyLevel: "medium"
-  },
-  {
-    id: "need_6c",
-    title: "Cotton Bath Towels & Face Cloths",
-    category: "Clothing",
-    categories: ["Clothing", "Textiles"],
-    description: "Absorbent large bath towels and soft washcloths for community evacuation center showers.",
-    imageUrl: "https://images.unsplash.com/photo-1616627547584-bf28cee262db?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1616627547584-bf28cee262db?auto=format&fit=crop&w=800&q=80"],
-    location: "Petaling Jaya, Selangor",
-    quantity: 35,
-    unit: "towels",
-    pledgedQuantity: 22,
-    organizerName: "Petaling Community Care (NGO)",
-    postedDate: "2 DAYS AGO",
-    postedTimestamp: Date.now() - 172800000,
-    status: "active",
-    urgencyLevel: "medium"
-  },
-  {
-    id: "need_6d",
-    title: "Durable Walking Shoes & Sneakers",
-    category: "Clothing",
-    categories: ["Clothing", "Shoes"],
-    description: "Comfortable non-slip walking shoes and athletic sneakers in sizes 38 to 44 for relief volunteers and residents.",
-    imageUrl: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=800&q=80"],
-    location: "Klang, Selangor",
-    quantity: 18,
-    unit: "pairs",
-    pledgedQuantity: 11,
-    organizerName: "Klang Valley Relief Mission (Charity)",
-    postedDate: "3 DAYS AGO",
-    postedTimestamp: Date.now() - 259200000,
-    status: "active",
-    urgencyLevel: "medium"
-  },
-  {
-    id: "need_6e",
-    title: "Thermal Socks & Cotton Undershirts",
-    category: "Clothing",
-    categories: ["Clothing", "Textiles"],
-    description: "Clean new breathable cotton socks (multipacks) and undershirts for nursing home elders.",
-    imageUrl: "https://images.unsplash.com/photo-1586350977771-b3b0abd50c82?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1586350977771-b3b0abd50c82?auto=format&fit=crop&w=800&q=80"],
-    location: "Subang Jaya, Selangor",
-    quantity: 50,
-    unit: "pairs",
-    pledgedQuantity: 30,
-    organizerName: "Subang Elderly Care Society (NGO)",
-    postedDate: "4 DAYS AGO",
-    postedTimestamp: Date.now() - 345600000,
-    status: "active",
-    urgencyLevel: "standard"
-  },
-  {
-    id: "need_7",
-    title: "10kg AAA Fragrant White Rice",
-    category: "Food",
-    categories: ["Foods", "Living Things"],
-    description: "Essential 10kg bags of white rice to support low-income families and single mothers in Klang Valley.",
-    imageUrl: "https://images.unsplash.com/photo-1586201375761-83865001e31c?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1586201375761-83865001e31c?auto=format&fit=crop&w=800&q=80"],
-    location: "Shah Alam, Selangor",
-    quantity: 25,
-    unit: "bags",
-    pledgedQuantity: 18,
-    organizerName: "Selangor Food Aid Network (NGO)",
-    postedDate: "1 DAY AGO",
-    postedTimestamp: Date.now() - 86400000,
-    status: "active",
-    urgencyLevel: "medium"
-  },
-  {
-    id: "need_household_1",
-    title: "Foldable Single Mattresses & Foam Beds",
-    category: "Household",
-    categories: ["Household", "Furniture", "Living Things"],
-    description: "Comfortable high-density foldable foam mattresses and sleeping mats for displaced families in temporary relief center.",
-    imageUrl: "https://images.unsplash.com/photo-1582533561751-ef6f6ab93a2e?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1582533561751-ef6f6ab93a2e?auto=format&fit=crop&w=800&q=80"],
-    location: "Shah Alam, Selangor",
-    quantity: 15,
-    unit: "mattresses",
-    pledgedQuantity: 9,
-    organizerName: "Shah Alam Emergency Shelter (Charity)",
-    postedDate: "1 DAY AGO",
-    postedTimestamp: Date.now() - 86400000,
-    status: "active",
-    urgencyLevel: "medium"
-  },
-  {
-    id: "need_household_2",
-    title: "Electric Kettles & Cooking Stoves",
-    category: "Household",
-    categories: ["Household", "Living Things"],
-    description: "Rapid-boil stainless steel electric water kettles and portable single-burner induction hotplates for community kitchen.",
-    imageUrl: "https://images.unsplash.com/photo-1585659722983-3a675dabf23d?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1585659722983-3a675dabf23d?auto=format&fit=crop&w=800&q=80"],
-    location: "Klang, Selangor",
-    quantity: 12,
-    unit: "units",
-    pledgedQuantity: 7,
-    organizerName: "Klang Community Kitchen (NGO)",
-    postedDate: "2 DAYS AGO",
-    postedTimestamp: Date.now() - 172800000,
-    status: "active",
-    urgencyLevel: "medium"
-  },
-  {
-    id: "need_household_3",
-    title: "Bed Linens & Supportive Pillows",
-    category: "Household",
-    categories: ["Household", "Furniture"],
-    description: "Washable fitted bedsheet sets, pillowcases, and hypoallergenic soft sleeping pillows for community shelter beds.",
-    imageUrl: "https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?auto=format&fit=crop&w=800&q=80"],
-    location: "Petaling Jaya, Selangor",
-    quantity: 25,
-    unit: "sets",
-    pledgedQuantity: 16,
-    organizerName: "Petaling Shelter Initiative (NGO)",
-    postedDate: "3 DAYS AGO",
-    postedTimestamp: Date.now() - 259200000,
-    status: "active",
-    urgencyLevel: "standard"
-  },
-  {
-    id: "need_8",
-    title: "Wheelchairs for Elderly Shelter",
-    category: "Medical",
-    categories: ["Medical", "Elderly / OKU"],
-    description: "Foldable lightweight mobility wheelchairs for senior citizens recovering from stroke.",
-    imageUrl: "https://images.unsplash.com/photo-1576765608535-5f04d1e3f289?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1576765608535-5f04d1e3f289?auto=format&fit=crop&w=800&q=80"],
-    location: "George Town, Penang",
-    quantity: 5,
-    unit: "units",
-    pledgedQuantity: 3,
-    organizerName: "Penang Elderly Care Foundation (NGO)",
-    postedDate: "3 DAYS AGO",
-    postedTimestamp: Date.now() - 259200000,
-    status: "active",
-    urgencyLevel: "medium"
-  },
-  {
-    id: "need_10",
-    title: "School Bags & Stationery Packs",
-    category: "Education",
-    categories: ["Education", "Child", "Books"],
-    description: "Durable backpacks, pencils, color sets, and exercise books for primary school students.",
-    imageUrl: "https://images.unsplash.com/photo-1546410531-bb4caa6b424d?auto=format&fit=crop&w=800&q=80",
-    images: ["https://images.unsplash.com/photo-1546410531-bb4caa6b424d?auto=format&fit=crop&w=800&q=80"],
-    location: "Ipoh, Perak",
-    quantity: 30,
-    unit: "sets",
-    pledgedQuantity: 20,
-    organizerName: "Perak Children Education Aid (NGO)",
-    postedDate: "2 DAYS AGO",
-    postedTimestamp: Date.now() - 172800000,
-    status: "active",
-    urgencyLevel: "medium"
-  }
-];
+// Master community requests catalog (includes Sister Mary Theresa, Uncle Tan, all registered recipients & community needs)
+export const DEFAULT_NEEDS_REQUESTS: RecipientRequest[] = MASTER_COMMUNITY_REQUESTS;
 
 // Exact badge color styling dictionary matching the AidStory design system
 export const BADGE_COLOR_MAP: Record<string, { bg: string; text: string }> = {
+  CAMPAIGN: { bg: "bg-[#7c3aed]", text: "text-white" },
+  INDIVIDUAL: { bg: "bg-[#0284c7]", text: "text-white" },
+  ORGANIZATION: { bg: "bg-[#0f766e]", text: "text-white" },
+  COMMUNITY: { bg: "bg-[#059669]", text: "text-white" },
   EMERGENCY: { bg: "bg-[#d31818]", text: "text-white" },
   URGENT: { bg: "bg-[#d31818]", text: "text-white" },
   "URGENT NEED": { bg: "bg-[#d31818]", text: "text-white" },
@@ -458,56 +101,76 @@ export const BADGE_COLOR_MAP: Record<string, { bg: string; text: string }> = {
   OTHERS: { bg: "bg-[#455a64]", text: "text-white" }
 };
 
-// Helper to extract category badges for a request consistently
-export const getBadgesForRequest = (req: RecipientRequest): string[] => {
-  if (req.categories && req.categories.length > 0) {
-    return req.categories;
-  }
-  if (req.category) {
-    if (req.category === "Emergency") return ["EMERGENCY"];
-    if (req.category === "Food") return ["FOODS"];
-    if (req.category === "Animal") return ["ANIMALS"];
-    if (req.category === "Education") return ["EDUCATION", "BOOKS"];
-    if (req.category === "Clothing") return ["CLOTHING", "TEXTILES"];
-    if (req.category === "Household") return ["HOUSEHOLD", "FURNITURE"];
-    return [req.category.toUpperCase()];
-  }
-  return ["GENERAL"];
-};
-
-// Helper to determine if a request is Emergency / Urgent
-export const isEmergencyOrUrgent = (req: RecipientRequest): boolean => {
-  const badges = (req.categories || (req.category ? [req.category] : [])).map((b) => b.toUpperCase());
-  const tags = (req.tags || []).map((t) => t.toUpperCase());
-  const cat = (req.category || "").toUpperCase();
-  const urgency = (req.urgencyLevel || "").toLowerCase();
-
-  // Explicit 'Not Emergency' override
-  if (tags.some((t) => t.includes("NOT EMERGENCY")) || badges.some((b) => b.includes("NOT EMERGENCY"))) {
-    return false;
-  }
-
-  // Check for Emergency / Urgent badges or category
-  if (
-    badges.includes("EMERGENCY") ||
-    badges.includes("URGENT") ||
-    badges.includes("CRITICAL") ||
-    tags.includes("EMERGENCY") ||
-    tags.includes("URGENT") ||
-    cat === "EMERGENCY" ||
-    urgency === "emergency" ||
-    urgency === "urgent"
-  ) {
-    return true;
-  }
-
+// Helper to determine if a request belongs to a Campaign or is an Individual request
+export const isCampaignRequest = (req: RecipientRequest): boolean => {
+  if (req.campaignId && req.campaignId.trim() !== "") return true;
+  if (req.campaignTitle && req.campaignTitle.trim() !== "") return true;
+  if (req.title && req.title.toUpperCase().includes("CAMPAIGN")) return true;
+  if (req.authorType === "campaign" || req.authorType === "organization") return true;
+  if ((req.tags || []).some((t) => t.toUpperCase() === "CAMPAIGN")) return true;
+  if ((req.categories || []).some((c) => c.toUpperCase() === "CAMPAIGN")) return true;
   return false;
 };
 
-// Card color themes: Red for Emergency / Urgent items, Green for Non-Emergency items
+// Helper to get the request type label ("CAMPAIGN" or "INDIVIDUAL")
+export const getRequestTypeLabel = (req: RecipientRequest): "CAMPAIGN" | "INDIVIDUAL" => {
+  return isCampaignRequest(req) ? "CAMPAIGN" : "INDIVIDUAL";
+};
+
+// Helper to extract category badges for a request consistently
+export const getBadgesForRequest = (req: RecipientRequest): string[] => {
+  const typeBadge = getRequestTypeLabel(req);
+  let baseBadges: string[] = [];
+
+  if (req.categories && req.categories.length > 0) {
+    baseBadges = [...req.categories];
+  } else if (req.category) {
+    if (req.category === "Emergency") baseBadges = ["EMERGENCY"];
+    else if (req.category === "Food") baseBadges = ["FOODS"];
+    else if (req.category === "Animal") baseBadges = ["ANIMALS"];
+    else if (req.category === "Education") baseBadges = ["EDUCATION", "BOOKS"];
+    else if (req.category === "Clothing") baseBadges = ["CLOTHING", "TEXTILES"];
+    else if (req.category === "Household") baseBadges = ["HOUSEHOLD", "FURNITURE"];
+    else baseBadges = [req.category.toUpperCase()];
+  } else {
+    baseBadges = ["GENERAL"];
+  }
+
+  // Ensure typeBadge is first, avoiding duplicates
+  const filtered = baseBadges.filter(
+    (b) => b.toUpperCase() !== "CAMPAIGN" && b.toUpperCase() !== "INDIVIDUAL"
+  );
+  return [typeBadge, ...filtered];
+};
+
+export type RequestPriority = "emergency" | "important" | "standard";
+
+// Converts legacy saved values while ensuring all new requests follow the
+// three-level priority model: Emergency, Important, and Standard.
+export const getRequestPriority = (req: RecipientRequest): RequestPriority => {
+  switch ((req.urgencyLevel || "important").toLowerCase()) {
+    case "emergency":
+    case "high":
+      return "emergency";
+    case "standard":
+    case "low":
+      return "standard";
+    case "important":
+    case "medium":
+    case "urgent":
+    default:
+      return "important";
+  }
+};
+
+// Only Emergency requests receive the highest display and sorting priority.
+export const isEmergencyRequest = (req: RecipientRequest): boolean =>
+  getRequestPriority(req) === "emergency";
+
+// Card color themes: Red for Emergency items, Green for Important and Standard items
 export const getCardBgTheme = (req: RecipientRequest): string => {
-  if (isEmergencyOrUrgent(req)) {
-    // Red / Burgundy for Emergency & Urgent items
+  if (isEmergencyRequest(req)) {
+    // Red / Burgundy for Emergency items
     return "bg-[#541221] border-[#7a1b32]/50 hover:border-red-400/50";
   }
   // Green for Non-Emergency items
@@ -519,6 +182,62 @@ const CARD_BG_THEMES = [
   "bg-[#541221] border-[#7a1b32]/40",
   "bg-[#1d4334] border-[#295c47]/40"
 ];
+
+// Helper to extract a friendly, concise item name from a recipient request
+export const getCleanItemName = (req: RecipientRequest): string => {
+  let t = (req.title || "").trim();
+  // Strip "Campaign A - " or "Campaign B - " prefixes
+  t = t.replace(/^Campaign\s+[A-Za-z0-9]+\s*[-–—:]\s*/i, "").trim();
+  // If title is all uppercase, capitalize properly
+  if (t === t.toUpperCase() && t.length > 3) {
+    t = t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+  }
+  // Trim very long names for concise bar display
+  if (t.length > 20) {
+    t = t.slice(0, 18) + "...";
+  }
+  return t;
+};
+
+// Vibrant color palette for top requested items chart bars
+const CHART_BAR_COLORS = ["#a78bfa", "#3b82f6", "#fba94b", "#fde047", "#fb7185", "#34d399", "#38bdf8"];
+
+// Helper to compute top requested items dynamically from any list of active requests
+export const getTopRequestedItems = (requests: RecipientRequest[]) => {
+  if (!requests || requests.length === 0) {
+    return {
+      topItems: [
+        { name: "Storybooks", count: 0, color: "#a78bfa" },
+        { name: "White Rice", count: 0, color: "#3b82f6" },
+        { name: "Baby Diapers", count: 0, color: "#fba94b" },
+        { name: "Warm Blankets", count: 0, color: "#fde047" },
+        { name: "Medical Aid", count: 0, color: "#fb7185" },
+      ],
+      scaleMax: 20
+    };
+  }
+
+  const map = new Map<string, number>();
+  requests.forEach((req) => {
+    const name = getCleanItemName(req);
+    const qty = Math.max(1, req.quantity || 1);
+    map.set(name, (map.get(name) || 0) + qty);
+  });
+
+  const sorted = Array.from(map.entries())
+    .map(([name, count], idx) => ({
+      name,
+      count,
+      color: CHART_BAR_COLORS[idx % CHART_BAR_COLORS.length]
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  const maxVal = Math.max(...sorted.map((i) => i.count), 10);
+  const scaleMax = maxVal <= 20 ? 20 : Math.ceil(maxVal / 10) * 10;
+
+  return { topItems: sorted, scaleMax };
+};
 
 interface CategoryBannerData {
   id: string;
@@ -866,8 +585,8 @@ interface PriorityBannerData {
   name: string;
   subtitle?: string;
   imageUrl: string;
-  categoryType: "ORDER_BY" | "URGENCY" | "STATUS";
-  criteria: "HIGH_URGENCY" | "EMERGENCY" | "LATEST" | "OLDEST" | "MOST_FULFILLED" | "LEAST_FULFILLED" | "ACTIVE" | "FULFILLED";
+  categoryType: "ORDER_BY" | "URGENCY" | "CAMPAIGN";
+  criteria: "STANDARD_AID" | "IMPORTANT_NEED" | "EMERGENCY_NEED" | "LATEST" | "OLDEST" | "MOST_FULFILLED" | "LEAST_FULFILLED" | "CAMPAIGN" | "NON_CAMPAIGN";
   description: string;
   campaignCount: number;
   independentCount: number;
@@ -931,12 +650,12 @@ const PRIORITY_BANNER_LIST: PriorityBannerData[] = [
   },
   {
     id: "oldest",
-    name: "ORDER BY: OLDEST PENDING\n(LONGEST WAITING FIRST)",
-    subtitle: "Sort: Older → Newest (Choose One)",
+    name: "ORDER BY: OLDEST POSTED\n(OLDEST FIRST)",
+    subtitle: "Sort: Oldest → Newest (Choose One)",
     imageUrl: "https://images.unsplash.com/photo-1516026672322-bc52d61a55d5?w=900&auto=format&fit=crop&q=80",
     categoryType: "ORDER_BY",
     criteria: "OLDEST",
-    description: "Orders requests that have remained open longest and urgently need donor closure.",
+    description: "Orders requests that have been posted the longest and are waiting for fulfillment.",
     campaignCount: 3,
     independentCount: 7,
     topItems: [
@@ -948,75 +667,93 @@ const PRIORITY_BANNER_LIST: PriorityBannerData[] = [
     ],
   },
   {
-    id: "high_urgency",
-    name: "HIGH URGENCY\n& CRITICAL",
-    subtitle: "Urgency Level Filter",
+    id: "standard_aid",
+    name: "STANDARD AID\n(NON-CRITICAL SUPPLIES)",
+    subtitle: "Urgency Level: Standard Aid",
+    imageUrl: "https://images.unsplash.com/photo-1582533561751-ef6f6ab93a2e?w=900&auto=format&fit=crop&q=80",
+    categoryType: "URGENCY",
+    criteria: "STANDARD_AID",
+    description: "Standard community support supplies, study materials, and general living assistance.",
+    campaignCount: 4,
+    independentCount: 9,
+    topItems: [
+      { name: "School Backpacks", count: 68, max: 80, color: "#10b981" },
+      { name: "Story Books", count: 54, max: 80, color: "#34d399" },
+      { name: "Cotton Towels", count: 42, max: 80, color: "#6ee7b7" },
+      { name: "Stationery Sets", count: 32, max: 80, color: "#a7f3d0" },
+      { name: "Coloring Pencils", count: 18, max: 80, color: "#d1fae5" },
+    ],
+  },
+  {
+    id: "important_need",
+    name: "IMPORTANT NEED\n(REQUIRED WITHIN WEEK)",
+    subtitle: "Urgency Level: Important Need",
     imageUrl: "https://images.unsplash.com/photo-1542838132-92c53300491e?w=900&auto=format&fit=crop&q=80",
     categoryType: "URGENCY",
-    criteria: "HIGH_URGENCY",
-    description: "Urgent needs requiring swift delivery to prevent disruption to vulnerable centers.",
+    criteria: "IMPORTANT_NEED",
+    description: "Essential provisions and household equipment required within the week.",
     campaignCount: 6,
     independentCount: 11,
     topItems: [
-      { name: "Emergency Rice", count: 78, max: 80, color: "#ef4444" },
-      { name: "First Aid Kits", count: 64, max: 80, color: "#f97316" },
-      { name: "Baby Diapers", count: 52, max: 80, color: "#facc15" },
-      { name: "Disinfectants", count: 36, max: 80, color: "#3b82f6" },
-      { name: "Adult Diapers", count: 24, max: 80, color: "#a855f7" },
+      { name: "Rice & Cooking Oil", count: 76, max: 80, color: "#fba94b" },
+      { name: "Adult Diapers", count: 60, max: 80, color: "#facc15" },
+      { name: "Mattresses", count: 46, max: 80, color: "#fb923c" },
+      { name: "Electric Kettles", count: 34, max: 80, color: "#fdba74" },
+      { name: "Baby Formula", count: 22, max: 80, color: "#fed7aa" },
     ],
   },
   {
-    id: "emergency",
-    name: "DISASTER &\nEMERGENCY RELIEF",
-    subtitle: "Emergency Level Filter",
+    id: "emergency_need",
+    name: "EMERGENCY NEED\n(IMMEDIATE 24-48H)",
+    subtitle: "Urgency Level: Emergency Need",
     imageUrl: "https://images.unsplash.com/photo-1509316975850-ff9c5deb0cd9?w=900&auto=format&fit=crop&q=80",
     categoryType: "URGENCY",
-    criteria: "EMERGENCY",
-    description: "Crisis response gear, rescue provisions, water filters, and emergency food.",
+    criteria: "EMERGENCY_NEED",
+    description: "Immediate disaster relief supplies, life-saving items, and emergency packs within 24-48h.",
     campaignCount: 4,
     independentCount: 8,
     topItems: [
-      { name: "Water Filtration", count: 80, max: 80, color: "#ef4444" },
-      { name: "Rubber Boots", count: 62, max: 80, color: "#f97316" },
-      { name: "Dry Rations", count: 48, max: 80, color: "#facc15" },
-      { name: "Power Banks", count: 34, max: 80, color: "#3b82f6" },
-      { name: "Rescue Blankets", count: 20, max: 80, color: "#a855f7" },
+      { name: "Clean Water Filters", count: 80, max: 80, color: "#ef4444" },
+      { name: "First Aid Kits", count: 64, max: 80, color: "#f97316" },
+      { name: "Emergency Rations", count: 52, max: 80, color: "#f87171" },
+      { name: "Rescue Blankets", count: 36, max: 80, color: "#fca5a5" },
+      { name: "Power Banks", count: 24, max: 80, color: "#fecaca" },
     ],
   },
   {
-    id: "active_only",
-    name: "ACTIVE OPEN\nNEEDS",
-    subtitle: "Status Filter",
-    imageUrl: "https://images.unsplash.com/photo-1582533561751-ef6f6ab93a2e?w=900&auto=format&fit=crop&q=80",
-    categoryType: "STATUS",
-    criteria: "ACTIVE",
-    description: "All live requests ready for immediate community delivery and courier drop-offs.",
+    id: "campaign",
+    name: "CAMPAIGN\nREQUESTS",
+    subtitle: "Organized Campaigns",
+    imageUrl: "https://images.unsplash.com/photo-1593113598332-cd288d649433?w=900&auto=format&fit=crop&q=80",
+    categoryType: "CAMPAIGN",
+    criteria: "CAMPAIGN",
+    description: "Needs published under organized charity and community campaigns.",
     campaignCount: 8,
+    independentCount: 0,
+    topItems: [
+      { name: "Bulk Rice Packs", count: 75, max: 80, color: "#06b6d4" },
+      { name: "Care Kits", count: 60, max: 80, color: "#22d3ee" },
+      { name: "School Essentials", count: 48, max: 80, color: "#67e8f9" },
+      { name: "Elderly Provisions", count: 30, max: 80, color: "#a5f3fc" },
+      { name: "Hygiene Bundles", count: 18, max: 80, color: "#cffafe" },
+    ],
+  },
+  {
+    id: "non_campaign",
+    name: "NON-CAMPAIGN\n(INDEPENDENT) REQUESTS",
+    subtitle: "Independent Requests",
+    imageUrl: "https://images.unsplash.com/photo-1488521787991-ed7bbaae773c?w=900&auto=format&fit=crop&q=80",
+    categoryType: "CAMPAIGN",
+    criteria: "NON_CAMPAIGN",
+    description: "Direct community requests submitted independently by families and individuals.",
+    campaignCount: 0,
     independentCount: 16,
     topItems: [
-      { name: "Food Provisions", count: 78, max: 80, color: "#3b82f6" },
-      { name: "Personal Hygiene", count: 62, max: 80, color: "#a78bfa" },
-      { name: "Household Furniture", count: 48, max: 80, color: "#fba94b" },
-      { name: "Medical Equipment", count: 34, max: 80, color: "#fde047" },
-      { name: "Warm Clothing", count: 20, max: 80, color: "#fb7185" },
-    ],
-  },
-  {
-    id: "fulfilled_completed",
-    name: "COMPLETED &\nFULFILLED NEEDS",
-    subtitle: "Status Filter",
-    imageUrl: "https://images.unsplash.com/photo-1584100936595-c0654b55a2e2?w=900&auto=format&fit=crop&q=80",
-    categoryType: "STATUS",
-    criteria: "FULFILLED",
-    description: "Archived needs that have achieved 100% pledges through generous donors.",
-    campaignCount: 4,
-    independentCount: 6,
-    topItems: [
-      { name: "Flood Blankets", count: 75, max: 80, color: "#10b981" },
-      { name: "Rice Rations", count: 58, max: 80, color: "#34d399" },
-      { name: "Baby Care Packs", count: 45, max: 80, color: "#6ee7b7" },
-      { name: "School Backpacks", count: 30, max: 80, color: "#a7f3d0" },
-      { name: "Pet Kibbles", count: 18, max: 80, color: "#d1fae5" },
+      { name: "Groceries", count: 78, max: 80, color: "#8b5cf6" },
+      { name: "Baby Diapers", count: 58, max: 80, color: "#a78bfa" },
+      { name: "Study Tables", count: 42, max: 80, color: "#c4b5fd" },
+      { name: "Wheelchairs", count: 32, max: 80, color: "#ddd6fe" },
+      { name: "Clothing Sets", count: 20, max: 80, color: "#ede9fe" },
     ],
   },
 ];
@@ -1071,6 +808,119 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
   const [donateBoxDonorPhone, setDonateBoxDonorPhone] = useState("");
   const [isDonateBoxCheckingOut, setIsDonateBoxCheckingOut] = useState(false);
 
+  // Load all requests (merging default catalog needs with any user-created requests across all accounts)
+  const [allRequests, setAllRequests] = useState<RecipientRequest[]>(() => {
+    return getAllMergedCommunityRequests();
+  });
+  const [deliveryPackages, setDeliveryPackages] = useState<DeliveryPackageItem[]>(() =>
+    getStoredDeliveryPackages(SEED_DELIVERY_PACKAGES)
+  );
+
+  // Listen for request additions/updates from "Your Request" or other tabs in real-time
+  useEffect(() => {
+    const handleCatalogUpdate = () => {
+      const freshRequests = getAllMergedCommunityRequests();
+      setAllRequests(freshRequests);
+    };
+
+    window.addEventListener("aidstory_requests_updated", handleCatalogUpdate);
+    window.addEventListener("storage", handleCatalogUpdate);
+
+    return () => {
+      window.removeEventListener("aidstory_requests_updated", handleCatalogUpdate);
+      window.removeEventListener("storage", handleCatalogUpdate);
+    };
+  }, []);
+
+  // Keep Browse Needs in step with the delivery records used by Delivery Status.
+  useEffect(() => {
+    const unsubscribe = subscribeToAllDeliveryPackages((cloudPackages) => {
+      if (cloudPackages && cloudPackages.length > 0) {
+        setDeliveryPackages((current) => {
+          const packageMap = new Map(current.map((pkg) => [pkg.id, pkg]));
+          cloudPackages.forEach((pkg) => packageMap.set(pkg.id, pkg));
+          return Array.from(packageMap.values());
+        });
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Store the same derived totals on the in-memory requests so all controls
+  // (remaining quantity, sorting, and progress labels) use delivery truth too.
+  useEffect(() => {
+    setAllRequests((current) =>
+      current.map((request) => {
+        const progress = getDeliveryProgress(request, deliveryPackages);
+        if (
+          request.pledgedQuantity === progress.pledged &&
+          request.receivedQuantity === progress.done &&
+          request.inTransitQuantity === progress.inTransit
+        ) {
+          return request;
+        }
+
+        return {
+          ...request,
+          pledgedQuantity: progress.pledged,
+          receivedQuantity: progress.done,
+          inTransitQuantity: progress.inTransit
+        };
+      })
+    );
+  }, [deliveryPackages]);
+
+  // Save requests back to global catalog in localStorage on updates
+  useEffect(() => {
+    if (typeof window !== "undefined" && allRequests.length > 0) {
+      localStorage.setItem("aidstory_all_needs", JSON.stringify(allRequests));
+    }
+  }, [allRequests]);
+
+  // Real-time Cloud Firestore synchronization across all devices
+  useEffect(() => {
+    seedInitialRequestsIfEmpty(MASTER_COMMUNITY_REQUESTS);
+
+    const unsubscribe = subscribeToAllRequests((cloudRequests) => {
+      if (cloudRequests && cloudRequests.length > 0) {
+        // Merge cloud requests with local catalog items
+        const local = getAllMergedCommunityRequests();
+        const reqMap = new Map<string, RecipientRequest>();
+
+        local.forEach((r) => reqMap.set(r.id, r));
+        cloudRequests.forEach((cr) => {
+          const existing = reqMap.get(cr.id);
+          reqMap.set(cr.id, {
+            ...existing,
+            ...cr,
+            // Prefer bundled catalogue pictures for the requests whose old remote
+            // photos were removed, even when Firestore still contains the old URL.
+            imageUrl: STABLE_REQUEST_IMAGE_IDS.has(cr.id) ? existing?.imageUrl ?? cr.imageUrl : cr.imageUrl,
+            images: STABLE_REQUEST_IMAGE_IDS.has(cr.id) ? existing?.images ?? cr.images : cr.images,
+            title: formatCapitalizedTitle(cr.title),
+            campaignTitle: cr.campaignTitle
+              ? formatCapitalizedTitle(cr.campaignTitle)
+              : existing?.campaignTitle
+              ? formatCapitalizedTitle(existing.campaignTitle)
+              : undefined
+          });
+        });
+
+        const mergedList = Array.from(reqMap.values()).map((request) => ({
+          ...request,
+          location: getCharityLocationForRequest(request)
+        }));
+        setAllRequests(mergedList);
+        try {
+          localStorage.setItem("aidstory_all_needs", JSON.stringify(mergedList));
+          localStorage.setItem("aidstory_recipient_requests", JSON.stringify(mergedList));
+        } catch (e) {}
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
   // Sync donate box to localStorage
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -1090,18 +940,19 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
     const remainingNeed = Math.max(1, req.quantity - req.pledgedQuantity);
     
     setDonateBoxItems((prev) => {
-      const existingIndex = prev.findIndex((item) => item.requestId === req.id);
+      const existingIndex = prev.findIndex(
+        (item) => item.requestId === req.id
+      );
       if (existingIndex > -1) {
-        const updated = [...prev];
-        const currentQty = updated[existingIndex].quantity;
-        const nextQty = Math.min(remainingNeed, currentQty + 1);
-        updated[existingIndex] = {
-          ...updated[existingIndex],
-          quantity: nextQty,
-          maxNeeded: remainingNeed
-        };
-        showToast(`Updated "${req.title}" in Donate Box (${nextQty} ${req.unit}) 📦`);
-        return updated;
+        // Toggle OFF: Delete/Remove from cart
+        const filtered = prev.filter(
+          (item) => item.requestId !== req.id
+        );
+        try {
+          localStorage.setItem("aidstory_donate_box_cart", JSON.stringify(filtered));
+        } catch (err) {}
+        showToast(`Removed "${req.title}" from Donate Box 📦`);
+        return filtered;
       } else {
         const newItem: any = {
           id: `box_item_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
@@ -1122,10 +973,93 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
           checked: true,
           donorNote: ""
         };
+        const updated = [...prev, newItem];
+        try {
+          localStorage.setItem("aidstory_donate_box_cart", JSON.stringify(updated));
+        } catch (err) {}
         showToast(`Collected "${req.title}" into Donate Box! 📦`);
-        return [...prev, newItem];
+        return updated;
       }
     });
+  };
+
+  // Handle "SUPPORT NOW" -> Navigates to Donate Box list and ticks ONLY the selected item
+  const handleSupportNowAndNavigate = (req: RecipientRequest, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+
+    // 1. Close any open detail or support modals
+    setSelectedDetailRequest(null);
+    setSelectedSupportReq(null);
+
+    // 2. Read existing cart from localStorage or state
+    let currentCart: any[] = [];
+    try {
+      const saved = localStorage.getItem("aidstory_donate_box_cart");
+      if (saved) {
+        currentCart = JSON.parse(saved);
+      }
+    } catch (err) {}
+
+    if (!Array.isArray(currentCart) || currentCart.length === 0) {
+      currentCart = [...donateBoxItems];
+    }
+
+    const remainingNeed = Math.max(1, req.quantity - (req.pledgedQuantity || 0));
+
+    // 3. Find if item already exists in cart
+    const existingIndex = currentCart.findIndex(
+      (item) => item.requestId === req.id
+    );
+
+    let updatedCart: any[] = [];
+
+    if (existingIndex > -1) {
+      // Uncheck all items EXCEPT this selected item (tick only the selected)
+      updatedCart = currentCart.map((item, idx) => ({
+        ...item,
+        checked: idx === existingIndex
+      }));
+    } else {
+      // Uncheck all existing items
+      const uncheckedExisting = currentCart.map((item) => ({
+        ...item,
+        checked: false
+      }));
+
+      // Create new selected item with checked: true
+      const newItem = {
+        id: `box_item_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        requestId: req.id,
+        title: req.title,
+        category: req.category,
+        imageUrl: req.imageUrl,
+        location: req.location,
+        unit: req.unit,
+        quantity: 1,
+        maxNeeded: remainingNeed,
+        organizerName: req.organizerName || req.authorName || "Hope Community Aid (NGO)",
+        brand: req.brand || "Any brand",
+        color: req.color || "Any",
+        originalPrice: 240000,
+        unitPrice: 195000,
+        urgencyDiscount: req.urgencyLevel === "high" ? 25 : 10,
+        checked: true,
+        donorNote: ""
+      };
+
+      updatedCart = [newItem, ...uncheckedExisting];
+    }
+
+    // 4. Save to localStorage and update state
+    setDonateBoxItems(updatedCart);
+    try {
+      localStorage.setItem("aidstory_donate_box_cart", JSON.stringify(updatedCart));
+    } catch (err) {}
+
+    showToast(`Selected "${req.title}" in your Donate Box list 📦`);
+
+    // 5. Navigate to Donate Box List ("preparing_donate_box")
+    handleNavigateToDonateBoxPage();
   };
 
   const handleUpdateDonateBoxQuantity = (itemId: string, newQty: number) => {
@@ -1147,6 +1081,22 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
       if (removed) {
         showToast(`Removed "${removed.title}" from Donate Box`);
       }
+      try {
+        localStorage.setItem("aidstory_donate_box_cart", JSON.stringify(filtered));
+      } catch (err) {}
+      return filtered;
+    });
+  };
+
+  const handleRemoveRequestFromDonateBox = (req: RecipientRequest) => {
+    setDonateBoxItems((prev) => {
+      const filtered = prev.filter(
+        (item) => item.requestId !== req.id
+      );
+      try {
+        localStorage.setItem("aidstory_donate_box_cart", JSON.stringify(filtered));
+      } catch (err) {}
+      showToast(`Removed "${req.title}" from Donate Box 📦`);
       return filtered;
     });
   };
@@ -1195,11 +1145,13 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
 
       const savedCompletedJSON = localStorage.getItem("aidstory_completed_donations") || "[]";
       try {
+        const currentUser = JSON.parse(localStorage.getItem("aidstory_current_user") || "null");
         const savedCompleted: any[] = JSON.parse(savedCompletedJSON);
         donateBoxItems.forEach((item) => {
           savedCompleted.push({
             id: `donate-box-${Date.now()}-${item.id}`,
             type: "donate_box_cart",
+            userEmail: currentUser?.email || "anonymous@aidstory.org",
             title: item.title,
             category: item.category,
             quantity: item.quantity,
@@ -1211,6 +1163,30 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
         localStorage.setItem("aidstory_completed_donations", JSON.stringify(savedCompleted));
       } catch (err) {}
 
+      // Sync each updated request to Cloud Firestore
+      donateBoxItems.forEach((item) => {
+        const matching = allRequests.find((r) => r.id === item.requestId);
+        if (matching) {
+          const nextPledged = Math.min(matching.quantity, (matching.pledgedQuantity || 0) + item.quantity);
+          const nextStatus = nextPledged >= matching.quantity ? "fulfilled" : matching.status;
+          updateRequestInCloud(item.requestId, {
+            pledgedQuantity: nextPledged,
+            status: nextStatus as any
+          }).catch((err) => console.warn("Cloud pledge update failed:", err));
+
+          savePledgeToCloud({
+            requestId: item.requestId,
+            donorName: donateBoxDonorName.trim() || "Anonymous Community Donor",
+            donorContact: donateBoxDonorPhone.trim() || "",
+            donorNote: donateBoxDonorNote.trim() || "",
+            quantity: item.quantity,
+            deliveryMethod: donateBoxDeliveryMethod,
+            status: "Delivered",
+            createdAt: new Date().toISOString()
+          }).catch((err) => console.warn("Cloud save pledge failed:", err));
+        }
+      });
+
       const totalItemsCount = donateBoxItems.reduce((acc, curr) => acc + curr.quantity, 0);
       setDonateBoxItems([]);
       setIsDonateBoxCheckingOut(false);
@@ -1218,47 +1194,6 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
       showToast(`🎉 Success! ${totalItemsCount} donation item(s) dispatched from your Donate Box!`);
     }, 700);
   };
-
-  // Load all requests (merging default requests with any user-created requests in localStorage)
-  const [allRequests, setAllRequests] = useState<RecipientRequest[]>(() => {
-    if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("aidstory_recipient_requests");
-      if (saved) {
-        try {
-          const parsed: RecipientRequest[] = JSON.parse(saved);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            // Keep user-created custom requests and merge default items with fresh category/urgency metadata
-            const defaultIdMap = new Map(DEFAULT_NEEDS_REQUESTS.map((d) => [d.id, d]));
-            const mergedDefaults = DEFAULT_NEEDS_REQUESTS.map((d) => {
-              const existing = parsed.find((p) => p.id === d.id);
-              if (existing) {
-                return {
-                  ...d,
-                  pledgedQuantity: existing.pledgedQuantity !== undefined ? existing.pledgedQuantity : d.pledgedQuantity,
-                  status: existing.status || d.status,
-                  updates: existing.updates || d.updates,
-                  comments: existing.comments || d.comments
-                };
-              }
-              return d;
-            });
-            const customUserRequests = parsed.filter((r) => !defaultIdMap.has(r.id));
-            return [...mergedDefaults, ...customUserRequests];
-          }
-        } catch (e) {
-          // Fallback to default
-        }
-      }
-    }
-    return DEFAULT_NEEDS_REQUESTS;
-  });
-
-  // Save requests back to localStorage on updates
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      localStorage.setItem("aidstory_recipient_requests", JSON.stringify(allRequests));
-    }
-  }, [allRequests]);
 
   // Helper toast notification
   const showToast = (msg: string) => {
@@ -1373,40 +1308,51 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
       }
     }
 
-    // Priority & Status Banner Filter (from Priority & Status visual photo banner view)
+    // Priority & Campaign Banner Filter (from Filter Drawer options)
     if (selectedPriorityBannerIds.length > 0) {
       const activePriorityBanners = PRIORITY_BANNER_LIST.filter((p) =>
         selectedPriorityBannerIds.includes(p.id)
       );
 
-      // Separate filter criteria (urgency & status) from pure ordering criteria
+      // Separate filter criteria (urgency & campaign) from pure ordering criteria
       const filteringBanners = activePriorityBanners.filter((b) => b.categoryType !== "ORDER_BY");
 
       if (filteringBanners.length > 0) {
-        const badges = getBadgesForRequest(req).map((b) => b.toUpperCase());
-        const urgency = (req.urgencyLevel || req.urgency || "MEDIUM").toUpperCase();
-        const status = (req.status || "ACTIVE").toUpperCase();
-        const totalQty = req.quantity || 1;
-        const pledgedQty = req.pledgedQuantity || 0;
-        const fulfillmentRatio = pledgedQty / totalQty;
+        const priority = getRequestPriority(req);
+        const isCamp = isCampaignRequest(req);
 
-        const matchesAnyFilter = filteringBanners.some((banner) => {
-          switch (banner.criteria) {
-            case "HIGH_URGENCY":
-              return urgency === "HIGH" || badges.includes("HIGH") || urgency === "EMERGENCY" || badges.includes("EMERGENCY");
-            case "EMERGENCY":
-              return urgency === "EMERGENCY" || badges.includes("EMERGENCY") || badges.includes("DISASTER") || req.category === "Emergency";
-            case "ACTIVE":
-              return status === "ACTIVE" || status === "OPEN" || status === "IN-PROGRESS";
-            case "FULFILLED":
-              return status === "FULFILLED" || fulfillmentRatio >= 1;
-            default:
-              return true;
+        const urgencyBanners = filteringBanners.filter((b) => b.categoryType === "URGENCY");
+        const campaignBanners = filteringBanners.filter((b) => b.categoryType === "CAMPAIGN");
+
+        // Check Urgency match
+        if (urgencyBanners.length > 0) {
+          const matchesUrgency = urgencyBanners.some((b) => {
+            if (b.criteria === "STANDARD_AID") {
+              return priority === "standard";
+            }
+            if (b.criteria === "IMPORTANT_NEED") {
+              return priority === "important";
+            }
+            if (b.criteria === "EMERGENCY_NEED") {
+              return priority === "emergency";
+            }
+            return true;
+          });
+          if (!matchesUrgency) {
+            return false;
           }
-        });
+        }
 
-        if (!matchesAnyFilter) {
-          return false;
+        // Check Campaign match
+        if (campaignBanners.length > 0) {
+          const matchesCampaign = campaignBanners.some((b) => {
+            if (b.criteria === "CAMPAIGN") return isCamp;
+            if (b.criteria === "NON_CAMPAIGN") return !isCamp;
+            return true;
+          });
+          if (!matchesCampaign) {
+            return false;
+          }
         }
       }
     }
@@ -1429,31 +1375,19 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
 
     // Quick priority filter chips
     if (selectedPriorityFilter !== "ALL") {
-      const urgency = (req.urgencyLevel || req.urgency || "MEDIUM").toUpperCase();
-      const status = (req.status || "OPEN").toUpperCase();
-      if (selectedPriorityFilter === "EMERGENCY" && urgency !== "EMERGENCY" && !getBadgesForRequest(req).includes("EMERGENCY")) {
+      const priority = getRequestPriority(req);
+      if (selectedPriorityFilter === "EMERGENCY" && priority !== "emergency") {
         return false;
-      } else if (selectedPriorityFilter === "HIGH" && urgency !== "HIGH") {
+      } else if (selectedPriorityFilter === "IMPORTANT" && priority !== "important") {
         return false;
-      } else if (selectedPriorityFilter === "STANDARD" && urgency !== "LOW" && urgency !== "MEDIUM" && urgency !== "STANDARD") {
-        return false;
-      } else if (selectedPriorityFilter === "FULFILLED" && status !== "FULFILLED") {
-        return false;
-      } else if (selectedPriorityFilter === "ACTIVE" && status !== "OPEN" && status !== "IN-PROGRESS" && status !== "ACTIVE") {
+      } else if (selectedPriorityFilter === "STANDARD" && priority !== "standard") {
         return false;
       }
     }
 
     return true;
   }).sort((a, b) => {
-    // 1. By default, Emergency / Urgent requests are placed in front of non-emergency requests
-    const aIsEmergency = isEmergencyOrUrgent(a) ? 1 : 0;
-    const bIsEmergency = isEmergencyOrUrgent(b) ? 1 : 0;
-    if (aIsEmergency !== bIsEmergency) {
-      return bIsEmergency - aIsEmergency; // Emergency items (1) come before non-emergency (0)
-    }
-
-    // 2. Banner ordering options (when explicitly chosen)
+    // Banner ordering options (when explicitly chosen, direct ordering takes precedence)
     const hasLatest = selectedPriorityBannerIds.includes("latest");
     const hasOldest = selectedPriorityBannerIds.includes("oldest");
     const hasMostFulfilled = selectedPriorityBannerIds.includes("most_fulfilled");
@@ -1479,6 +1413,15 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
       const ratioB = (b.pledgedQuantity || 0) / (b.quantity || 1);
       return ratioA - ratioB;
     }
+
+    // Default: Emergency, Important, then Standard requests.
+    const priorityOrder = { emergency: 3, important: 2, standard: 1 };
+    const aPriority = priorityOrder[getRequestPriority(a)];
+    const bPriority = priorityOrder[getRequestPriority(b)];
+    if (aPriority !== bPriority) {
+      return bPriority - aPriority;
+    }
+
     // Default secondary sort: newest first
     return (b.postedTimestamp || 0) - (a.postedTimestamp || 0);
   });
@@ -1486,11 +1429,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
   // Calculate Progress Segments
   const getProgressData = (req: RecipientRequest) => {
     const total = req.quantity || 1;
-    // Calculate done and in-transit
-    // "done": completed verified units (approx 20%-50% of pledged)
-    const pledged = req.pledgedQuantity || 0;
-    const done = Math.min(pledged, Math.max(0, Math.floor(pledged * 0.4)));
-    const inTransit = Math.max(0, pledged - done);
+    const { pledged, done, inTransit } = getDeliveryProgress(req, deliveryPackages);
     const needed = Math.max(0, total - (done + inTransit));
 
     const donePct = Math.min(100, Math.round((done / total) * 100));
@@ -1586,10 +1525,12 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
       // Record completed donation entry
       const savedCompletedJSON = localStorage.getItem("aidstory_completed_donations") || "[]";
       try {
+        const currentUser = JSON.parse(localStorage.getItem("aidstory_current_user") || "null");
         const savedCompleted: any[] = JSON.parse(savedCompletedJSON);
         savedCompleted.push({
           id: `pledge-${Date.now()}`,
           type: "support_need",
+          userEmail: currentUser?.email || "anonymous@aidstory.org",
           title: selectedSupportReq.title,
           category: selectedSupportReq.category,
           quantity: pledgeQuantityInput,
@@ -1601,6 +1542,25 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
       } catch (err) {
         // ignore
       }
+
+      // Sync updated request and save pledge record to Cloud Firestore
+      const nextPledged = Math.min(selectedSupportReq.quantity, (selectedSupportReq.pledgedQuantity || 0) + pledgeQuantityInput);
+      const nextStatus = nextPledged >= selectedSupportReq.quantity ? "fulfilled" : selectedSupportReq.status;
+      updateRequestInCloud(selectedSupportReq.id, {
+        pledgedQuantity: nextPledged,
+        status: nextStatus as any
+      }).catch((err) => console.warn("Cloud request update failed:", err));
+
+      savePledgeToCloud({
+        requestId: selectedSupportReq.id,
+        donorName: donorNameInput.trim() || "Anonymous Community Donor",
+        donorContact: donorContactInput.trim() || "",
+        donorNote: donorNoteInput.trim() || "",
+        quantity: pledgeQuantityInput,
+        deliveryMethod: "Drop-off / Direct Delivery",
+        status: "Pledged",
+        createdAt: new Date().toISOString()
+      }).catch((err) => console.warn("Cloud save pledge failed:", err));
 
       setIsPledgeSubmitting(false);
       const supportedTitle = selectedSupportReq.title;
@@ -1843,34 +1803,52 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                   {/* LEFT COLUMN: Top Requested Items in Selected Priority/Status & Stats Cards */}
                   <div className="lg:col-span-5 flex flex-col justify-between gap-4">
                     
-                    {/* Top Card: Items Mostly Requested in Selected Urgency/Status criteria */}
+                    {/* Top Card: Items Mostly Requested in Selected Urgency/Campaign criteria */}
                     {(() => {
                       const selectedBanners = PRIORITY_BANNER_LIST.filter((p) =>
                         selectedPriorityBannerIds.includes(p.id)
                       );
-                      const effectiveBanners =
-                        selectedBanners.length > 0 ? selectedBanners : PRIORITY_BANNER_LIST;
+                      const filteringBanners = selectedBanners.filter((b) => b.categoryType !== "ORDER_BY");
 
-                      // Aggregate top requested items across selected priority banners
-                      const itemMap = new Map<string, { count: number; color: string }>();
-                      effectiveBanners.forEach((p) => {
-                        p.topItems.forEach((it) => {
-                          const existing = itemMap.get(it.name);
-                          if (existing) {
-                            existing.count += it.count;
-                          } else {
-                            itemMap.set(it.name, { count: it.count, color: it.color });
-                          }
-                        });
+                      const matchingRequests = allRequests.filter((req) => {
+                        if (req.status === "cancelled") return false;
+                        if (filteringBanners.length === 0) return true;
+
+                        const priority = getRequestPriority(req);
+                        const isCamp = isCampaignRequest(req);
+
+                        const urgencyBanners = filteringBanners.filter((b) => b.categoryType === "URGENCY");
+                        const campaignBanners = filteringBanners.filter((b) => b.categoryType === "CAMPAIGN");
+
+                        if (urgencyBanners.length > 0) {
+                          const matchesUrgency = urgencyBanners.some((b) => {
+                            if (b.criteria === "STANDARD_AID") {
+                              return priority === "standard";
+                            }
+                            if (b.criteria === "IMPORTANT_NEED") {
+                              return priority === "important";
+                            }
+                            if (b.criteria === "EMERGENCY_NEED") {
+                              return priority === "emergency";
+                            }
+                            return true;
+                          });
+                          if (!matchesUrgency) return false;
+                        }
+
+                        if (campaignBanners.length > 0) {
+                          const matchesCampaign = campaignBanners.some((b) => {
+                            if (b.criteria === "CAMPAIGN") return isCamp;
+                            if (b.criteria === "NON_CAMPAIGN") return !isCamp;
+                            return true;
+                          });
+                          if (!matchesCampaign) return false;
+                        }
+
+                        return true;
                       });
 
-                      const sortedTopItems = Array.from(itemMap.entries())
-                        .map(([name, data]) => ({ name, count: data.count, color: data.color }))
-                        .sort((a, b) => b.count - a.count)
-                        .slice(0, 5);
-
-                      const maxVal = Math.max(...sortedTopItems.map((i) => i.count), 20);
-                      const scaleMax = maxVal <= 80 ? 80 : Math.ceil(maxVal / 20) * 20;
+                      const { topItems: sortedTopItems, scaleMax } = getTopRequestedItems(matchingRequests);
 
                       // Header Title
                       let headerText = "Items Mostly Requested across All Urgency Levels";
@@ -1880,8 +1858,8 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                         const s1 = selectedBanners[0].name.split("\n")[0];
                         const s2 = selectedBanners[1].name.split("\n")[0];
                         headerText = `Items in ${s1} & ${s2}`;
-                      } else if (selectedBanners.length > 2) {
-                        headerText = `Items in ${selectedBanners.length} Selected Priority Tiers`;
+                      } else if (selectedBanners.length > 2 && selectedBanners.length < PRIORITY_BANNER_LIST.length) {
+                        headerText = `Items in ${selectedBanners.length} Selected Filters`;
                       }
 
                       return (
@@ -1944,30 +1922,41 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                         if (req.status === "cancelled") return false;
                         if (filteringBanners.length === 0) return true;
 
-                        const badges = getBadgesForRequest(req).map((b) => b.toUpperCase());
-                        const urgency = (req.urgencyLevel || req.urgency || "MEDIUM").toUpperCase();
-                        const status = (req.status || "ACTIVE").toUpperCase();
-                        const totalQty = req.quantity || 1;
-                        const pledgedQty = req.pledgedQuantity || 0;
-                        const fulfillmentRatio = pledgedQty / totalQty;
+                        const priority = getRequestPriority(req);
+                        const isCamp = isCampaignRequest(req);
 
-                        return filteringBanners.some((banner) => {
-                          switch (banner.criteria) {
-                            case "HIGH_URGENCY":
-                              return urgency === "HIGH" || badges.includes("HIGH") || urgency === "EMERGENCY" || badges.includes("EMERGENCY");
-                            case "EMERGENCY":
-                              return urgency === "EMERGENCY" || badges.includes("EMERGENCY") || badges.includes("DISASTER") || req.category === "Emergency";
-                            case "ACTIVE":
-                              return status === "ACTIVE" || status === "OPEN" || status === "IN-PROGRESS";
-                            case "FULFILLED":
-                              return status === "FULFILLED" || fulfillmentRatio >= 1;
-                            default:
-                              return true;
-                          }
-                        });
+                        const urgencyBanners = filteringBanners.filter((b) => b.categoryType === "URGENCY");
+                        const campaignBanners = filteringBanners.filter((b) => b.categoryType === "CAMPAIGN");
+
+                        if (urgencyBanners.length > 0) {
+                          const matchesUrgency = urgencyBanners.some((b) => {
+                            if (b.criteria === "STANDARD_AID") {
+                              return priority === "standard";
+                            }
+                            if (b.criteria === "IMPORTANT_NEED") {
+                              return priority === "important";
+                            }
+                            if (b.criteria === "EMERGENCY_NEED") {
+                              return priority === "emergency";
+                            }
+                            return true;
+                          });
+                          if (!matchesUrgency) return false;
+                        }
+
+                        if (campaignBanners.length > 0) {
+                          const matchesCampaign = campaignBanners.some((b) => {
+                            if (b.criteria === "CAMPAIGN") return isCamp;
+                            if (b.criteria === "NON_CAMPAIGN") return !isCamp;
+                            return true;
+                          });
+                          if (!matchesCampaign) return false;
+                        }
+
+                        return true;
                       });
 
-                      const totalCampaign = matchingRequests.filter((r) => Boolean(r.campaignTitle || r.campaignId)).length;
+                      const totalCampaign = matchingRequests.filter((r) => isCampaignRequest(r)).length;
                       const totalIndependent = matchingRequests.length - totalCampaign;
 
                       return (
@@ -1997,7 +1986,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
 
                   </div>
 
-                  {/* RIGHT COLUMN: Priority, Status & Ordering Pill Segmented Filters */}
+                  {/* RIGHT COLUMN: Priority, Urgency & Campaign Pill Segmented Filters */}
                   <div className="lg:col-span-7 flex flex-col justify-between space-y-4">
                     {/* Header bar with Active status & Reset */}
                     <div className="flex items-center justify-between pb-1 text-xs font-mono text-white/70">
@@ -2012,7 +2001,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                           type="button"
                           onClick={() => {
                             setSelectedPriorityBannerIds([]);
-                            showToast("Reset all priority, status and order options");
+                            showToast("Reset all priority, campaign and order options");
                           }}
                           className="text-[11px] text-yellow-300/90 hover:text-yellow-200 underline cursor-pointer transition-colors"
                         >
@@ -2022,14 +2011,14 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                     </div>
 
                     <div className="space-y-4 overflow-y-auto max-h-[400px] pr-1">
-                      {/* Filter 1: Order by Fulfillment (Exact match to uploaded screenshot) */}
+                      {/* Filter 1: Order by Fulfillment */}
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between px-2 text-[11px] font-mono uppercase tracking-wider text-amber-300 font-semibold">
                           <span>Order by Fulfillment</span>
                           <span className="text-white/40 text-[10px]">Choose one</span>
                         </div>
 
-                        {/* Pill Switcher Container (matching uploaded image) */}
+                        {/* Pill Switcher Container */}
                         <div className="bg-[#bcb6ab] p-1 rounded-full flex items-center shadow-inner border border-[#968e81]/60 w-full transition-all">
                           {/* Least Fulfilled */}
                           <button
@@ -2093,7 +2082,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                         </div>
                       </div>
 
-                      {/* Filter 2: Order by Time / Date */}
+                      {/* Filter 2: Order by Date Posted */}
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between px-2 text-[11px] font-mono uppercase tracking-wider text-amber-300 font-semibold">
                           <span>Order by Date Posted</span>
@@ -2101,7 +2090,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                         </div>
 
                         <div className="bg-[#bcb6ab] p-1 rounded-full flex items-center shadow-inner border border-[#968e81]/60 w-full transition-all">
-                          {/* Latest */}
+                          {/* Latest Posted */}
                           <button
                             type="button"
                             onClick={() => {
@@ -2131,7 +2120,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                             Latest Posted
                           </button>
 
-                          {/* Oldest */}
+                          {/* Oldest Posted */}
                           <button
                             type="button"
                             onClick={() => {
@@ -2149,7 +2138,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                                   "oldest",
                                 ];
                                 setSelectedPriorityBannerIds(next);
-                                showToast("Ordered by: Oldest Pending (Longest waiting first)");
+                                showToast("Ordered by: Oldest Posted (Oldest first)");
                               }
                             }}
                             className={`flex-1 py-2.5 sm:py-3 px-4 sm:px-6 rounded-full text-center transition-all duration-300 font-serif italic text-base sm:text-lg md:text-xl select-none cursor-pointer ${
@@ -2158,135 +2147,162 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                                 : "text-[#3e342b] hover:text-[#18120e] bg-transparent"
                             }`}
                           >
-                            Oldest Pending
+                            Oldest Posted
                           </button>
                         </div>
                       </div>
 
-                      {/* Filter 3: Filter by Urgency Level */}
+                      {/* Filter 3: Filter by Urgency Level (Standard Aid, Important Need, Emergency Need) */}
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between px-2 text-[11px] font-mono uppercase tracking-wider text-rose-300 font-semibold">
                           <span>Filter by Urgency Level</span>
                           <span className="text-white/40 text-[10px]">Toggle filter</span>
                         </div>
 
-                        <div className="bg-[#bcb6ab] p-1 rounded-full flex items-center shadow-inner border border-[#968e81]/60 w-full transition-all">
-                          {/* High Urgency */}
+                        <div className="bg-[#bcb6ab] p-1 rounded-full flex items-center shadow-inner border border-[#968e81]/60 w-full transition-all gap-1">
+                          {/* Standard Aid */}
                           <button
                             type="button"
                             onClick={() => {
-                              const isSelected = selectedPriorityBannerIds.includes("high_urgency");
+                              const isSelected = selectedPriorityBannerIds.includes("standard_aid");
                               if (isSelected) {
                                 setSelectedPriorityBannerIds(
-                                  selectedPriorityBannerIds.filter((id) => id !== "high_urgency")
+                                  selectedPriorityBannerIds.filter((id) => id !== "standard_aid")
                                 );
-                                showToast("Deselected High Urgency filter");
+                                showToast("Deselected Standard Aid filter");
                               } else {
                                 setSelectedPriorityBannerIds([
                                   ...selectedPriorityBannerIds,
-                                  "high_urgency",
+                                  "standard_aid",
                                 ]);
-                                showToast("Filtered by High Urgency & Critical");
+                                showToast("Filtered by Standard Aid (Non-critical supplies)");
                               }
                             }}
-                            className={`flex-1 py-2.5 sm:py-3 px-3 sm:px-5 rounded-full text-center transition-all duration-300 font-serif italic text-sm sm:text-base md:text-lg select-none cursor-pointer ${
-                              selectedPriorityBannerIds.includes("high_urgency")
+                            className={`flex-1 py-2.5 sm:py-3 px-2 sm:px-3 rounded-full text-center transition-all duration-300 font-serif italic text-xs sm:text-sm md:text-base select-none cursor-pointer ${
+                              selectedPriorityBannerIds.includes("standard_aid")
                                 ? "bg-[#faf8f4] text-[#241c16] shadow-md font-medium scale-[1.01]"
                                 : "text-[#3e342b] hover:text-[#18120e] bg-transparent"
                             }`}
                           >
-                            High Urgency & Critical
+                            Standard Aid
                           </button>
 
-                          {/* Emergency */}
+                          {/* Important Need */}
                           <button
                             type="button"
                             onClick={() => {
-                              const isSelected = selectedPriorityBannerIds.includes("emergency");
+                              const isSelected = selectedPriorityBannerIds.includes("important_need");
                               if (isSelected) {
                                 setSelectedPriorityBannerIds(
-                                  selectedPriorityBannerIds.filter((id) => id !== "emergency")
+                                  selectedPriorityBannerIds.filter((id) => id !== "important_need")
                                 );
-                                showToast("Deselected Emergency Relief filter");
+                                showToast("Deselected Important Need filter");
                               } else {
                                 setSelectedPriorityBannerIds([
                                   ...selectedPriorityBannerIds,
-                                  "emergency",
+                                  "important_need",
                                 ]);
-                                showToast("Filtered by Disaster & Emergency Relief");
+                                showToast("Filtered by Important Need (Required within week)");
                               }
                             }}
-                            className={`flex-1 py-2.5 sm:py-3 px-3 sm:px-5 rounded-full text-center transition-all duration-300 font-serif italic text-sm sm:text-base md:text-lg select-none cursor-pointer ${
-                              selectedPriorityBannerIds.includes("emergency")
+                            className={`flex-1 py-2.5 sm:py-3 px-2 sm:px-3 rounded-full text-center transition-all duration-300 font-serif italic text-xs sm:text-sm md:text-base select-none cursor-pointer ${
+                              selectedPriorityBannerIds.includes("important_need")
                                 ? "bg-[#faf8f4] text-[#241c16] shadow-md font-medium scale-[1.01]"
                                 : "text-[#3e342b] hover:text-[#18120e] bg-transparent"
                             }`}
                           >
-                            Emergency Relief
+                            Important Need
+                          </button>
+
+                          {/* Emergency Need */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const isSelected = selectedPriorityBannerIds.includes("emergency_need");
+                              if (isSelected) {
+                                setSelectedPriorityBannerIds(
+                                  selectedPriorityBannerIds.filter((id) => id !== "emergency_need")
+                                );
+                                showToast("Deselected Emergency Need filter");
+                              } else {
+                                setSelectedPriorityBannerIds([
+                                  ...selectedPriorityBannerIds,
+                                  "emergency_need",
+                                ]);
+                                showToast("Filtered by Emergency Need (Immediate 24-48h)");
+                              }
+                            }}
+                            className={`flex-1 py-2.5 sm:py-3 px-2 sm:px-3 rounded-full text-center transition-all duration-300 font-serif italic text-xs sm:text-sm md:text-base select-none cursor-pointer ${
+                              selectedPriorityBannerIds.includes("emergency_need")
+                                ? "bg-[#faf8f4] text-[#241c16] shadow-md font-medium scale-[1.01]"
+                                : "text-[#3e342b] hover:text-[#18120e] bg-transparent"
+                            }`}
+                          >
+                            Emergency Need
                           </button>
                         </div>
                       </div>
 
-                      {/* Filter 4: Filter by Status */}
+                      {/* Filter 4: Filter by Campaign Type */}
                       <div className="space-y-1.5">
-                        <div className="flex items-center justify-between px-2 text-[11px] font-mono uppercase tracking-wider text-emerald-300 font-semibold">
-                          <span>Filter by Status</span>
+                        <div className="flex items-center justify-between px-2 text-[11px] font-mono uppercase tracking-wider text-teal-300 font-semibold">
+                          <span>Filter by Campaign Type</span>
                           <span className="text-white/40 text-[10px]">Toggle filter</span>
                         </div>
 
                         <div className="bg-[#bcb6ab] p-1 rounded-full flex items-center shadow-inner border border-[#968e81]/60 w-full transition-all">
-                          {/* Active Only */}
+                          {/* Campaign */}
                           <button
                             type="button"
                             onClick={() => {
-                              const isSelected = selectedPriorityBannerIds.includes("active_only");
+                              const isSelected = selectedPriorityBannerIds.includes("campaign");
                               if (isSelected) {
                                 setSelectedPriorityBannerIds(
-                                  selectedPriorityBannerIds.filter((id) => id !== "active_only")
+                                  selectedPriorityBannerIds.filter((id) => id !== "campaign")
                                 );
-                                showToast("Deselected Active Open Needs filter");
+                                showToast("Deselected Campaign filter");
                               } else {
                                 setSelectedPriorityBannerIds([
                                   ...selectedPriorityBannerIds,
-                                  "active_only",
+                                  "campaign",
                                 ]);
-                                showToast("Filtered by Active Open Needs");
+                                showToast("Filtered by Campaign Requests");
                               }
                             }}
                             className={`flex-1 py-2.5 sm:py-3 px-3 sm:px-5 rounded-full text-center transition-all duration-300 font-serif italic text-sm sm:text-base md:text-lg select-none cursor-pointer ${
-                              selectedPriorityBannerIds.includes("active_only")
+                              selectedPriorityBannerIds.includes("campaign")
                                 ? "bg-[#faf8f4] text-[#241c16] shadow-md font-medium scale-[1.01]"
                                 : "text-[#3e342b] hover:text-[#18120e] bg-transparent"
                             }`}
                           >
-                            Active Open Needs
+                            Campaign
                           </button>
 
-                          {/* Fulfilled Completed */}
+                          {/* Non-Campaign */}
                           <button
                             type="button"
                             onClick={() => {
-                              const isSelected = selectedPriorityBannerIds.includes("fulfilled_completed");
+                              const isSelected = selectedPriorityBannerIds.includes("non_campaign");
                               if (isSelected) {
                                 setSelectedPriorityBannerIds(
-                                  selectedPriorityBannerIds.filter((id) => id !== "fulfilled_completed")
+                                  selectedPriorityBannerIds.filter((id) => id !== "non_campaign")
                                 );
-                                showToast("Deselected Completed Needs filter");
+                                showToast("Deselected Non-Campaign filter");
                               } else {
                                 setSelectedPriorityBannerIds([
                                   ...selectedPriorityBannerIds,
-                                  "fulfilled_completed",
+                                  "non_campaign",
                                 ]);
-                                showToast("Filtered by Completed & Fulfilled Needs");
+                                showToast("Filtered by Non-Campaign (Independent) Requests");
                               }
                             }}
                             className={`flex-1 py-2.5 sm:py-3 px-3 sm:px-5 rounded-full text-center transition-all duration-300 font-serif italic text-sm sm:text-base md:text-lg select-none cursor-pointer ${
-                              selectedPriorityBannerIds.includes("fulfilled_completed")
+                              selectedPriorityBannerIds.includes("non_campaign")
                                 ? "bg-[#faf8f4] text-[#241c16] shadow-md font-medium scale-[1.01]"
                                 : "text-[#3e342b] hover:text-[#18120e] bg-transparent"
                             }`}
                           >
-                            Fulfilled Needs
+                            Non-Campaign
                           </button>
                         </div>
                       </div>
@@ -2326,36 +2342,29 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                       const effectiveStates =
                         selectedStates.length > 0 ? selectedStates : MALAYSIA_STATES_BANNER_LIST;
 
-                      // Aggregate top requested items across selected states
-                      const itemMap = new Map<string, { count: number; color: string }>();
-                      effectiveStates.forEach((st) => {
-                        st.topItems.forEach((it) => {
-                          const existing = itemMap.get(it.name);
-                          if (existing) {
-                            existing.count += it.count;
-                          } else {
-                            itemMap.set(it.name, { count: it.count, color: it.color });
-                          }
-                        });
+                      // Filter matching requests strictly based on the selected state(s)
+                      const matchingRequests = allRequests.filter((req) => {
+                        if (req.status === "cancelled") return false;
+                        if (selectedStates.length === 0 || selectedStates.length === MALAYSIA_STATES_BANNER_LIST.length) {
+                          return true;
+                        }
+                        const locLower = (req.location || "").toLowerCase();
+                        return effectiveStates.some((st) =>
+                          st.cityTags.some((tag) => locLower.includes(tag.toLowerCase()))
+                        );
                       });
 
-                      const sortedTopItems = Array.from(itemMap.entries())
-                        .map(([name, data]) => ({ name, count: data.count, color: data.color }))
-                        .sort((a, b) => b.count - a.count)
-                        .slice(0, 5);
-
-                      const maxVal = Math.max(...sortedTopItems.map((i) => i.count), 20);
-                      const scaleMax = maxVal <= 80 ? 80 : Math.ceil(maxVal / 20) * 20;
+                      const { topItems: sortedTopItems, scaleMax } = getTopRequestedItems(matchingRequests);
 
                       // Header Title
                       let headerText = "Items Mostly Requested in Malaysia (All States)";
                       if (selectedStates.length === 1) {
-                        headerText = `Items Mostly Requested in ${selectedStates[0].name.replace("\n", " ")}`;
+                        headerText = `Items Mostly Requested in ${selectedStates[0].name.replace(/\n/g, " ")}`;
                       } else if (selectedStates.length === 2) {
                         const s1 = selectedStates[0].name.split("\n")[0];
                         const s2 = selectedStates[1].name.split("\n")[0];
                         headerText = `Items Mostly Requested in ${s1} & ${s2}`;
-                      } else if (selectedStates.length > 2) {
+                      } else if (selectedStates.length > 2 && selectedStates.length < MALAYSIA_STATES_BANNER_LIST.length) {
                         headerText = `Items Mostly Requested in ${selectedStates.length} Selected States`;
                       }
 
@@ -2416,8 +2425,20 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                       const effectiveStates =
                         selectedStates.length > 0 ? selectedStates : MALAYSIA_STATES_BANNER_LIST;
 
-                      const totalCampaign = effectiveStates.reduce((acc, s) => acc + s.campaignCount, 0);
-                      const totalIndependent = effectiveStates.reduce((acc, s) => acc + s.independentCount, 0);
+                      // Filter requests matching selected states
+                      const matchingRequests = allRequests.filter((req) => {
+                        if (req.status === "cancelled") return false;
+                        if (selectedStates.length === 0 || selectedStates.length === MALAYSIA_STATES_BANNER_LIST.length) {
+                          return true;
+                        }
+                        const locLower = (req.location || "").toLowerCase();
+                        return effectiveStates.some((st) =>
+                          st.cityTags.some((tag) => locLower.includes(tag.toLowerCase()))
+                        );
+                      });
+
+                      const totalCampaign = matchingRequests.filter((r) => isCampaignRequest(r)).length;
+                      const totalIndependent = matchingRequests.length - totalCampaign;
 
                       return (
                         <div className="grid grid-cols-2 gap-3.5">
@@ -2593,26 +2614,17 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                       const effectiveCategories =
                         selectedCategories.length > 0 ? selectedCategories : CATEGORY_BANNER_LIST;
 
-                      // Aggregate top requested items across selected categories
-                      const itemMap = new Map<string, { count: number; color: string }>();
-                      effectiveCategories.forEach((cat) => {
-                        cat.topItems.forEach((it) => {
-                          const existing = itemMap.get(it.name);
-                          if (existing) {
-                            existing.count += it.count;
-                          } else {
-                            itemMap.set(it.name, { count: it.count, color: it.color });
-                          }
-                        });
+                      // Filter matching requests strictly based on the selected categories
+                      const matchingForStats = allRequests.filter((r) => {
+                        if (r.status === "cancelled") return false;
+                        if (selectedCategories.length === 0 || selectedCategories.length === CATEGORY_BANNER_LIST.length) {
+                          return true;
+                        }
+                        const reqCats = getRequestCategoryBannerIds(r);
+                        return effectiveCategories.some((c) => reqCats.includes(c.id));
                       });
 
-                      const sortedTopItems = Array.from(itemMap.entries())
-                        .map(([name, data]) => ({ name, count: data.count, color: data.color }))
-                        .sort((a, b) => b.count - a.count)
-                        .slice(0, 5);
-
-                      const maxVal = Math.max(...sortedTopItems.map((i) => i.count), 20);
-                      const scaleMax = maxVal <= 80 ? 80 : Math.ceil(maxVal / 20) * 20;
+                      const { topItems: sortedTopItems, scaleMax } = getTopRequestedItems(matchingForStats);
 
                       // Header Title
                       let headerText = "Items Mostly Requested across All Categories";
@@ -2622,7 +2634,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                         const c1 = selectedCategories[0].title.split("\n")[0];
                         const c2 = selectedCategories[1].title.split("\n")[0];
                         headerText = `Items Mostly Requested in ${c1} & ${c2}`;
-                      } else if (selectedCategories.length > 2) {
+                      } else if (selectedCategories.length > 2 && selectedCategories.length < CATEGORY_BANNER_LIST.length) {
                         headerText = `Items Mostly Requested in ${selectedCategories.length} Selected Categories`;
                       }
 
@@ -2685,11 +2697,14 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
 
                       const matchingForStats = allRequests.filter((r) => {
                         if (r.status === "cancelled") return false;
+                        if (selectedCategories.length === 0 || selectedCategories.length === CATEGORY_BANNER_LIST.length) {
+                          return true;
+                        }
                         const reqCats = getRequestCategoryBannerIds(r);
                         return effectiveCategories.some((c) => reqCats.includes(c.id));
                       });
 
-                      const totalCampaign = matchingForStats.filter((r) => Boolean(r.campaignTitle || r.campaignId)).length;
+                      const totalCampaign = matchingForStats.filter((r) => isCampaignRequest(r)).length;
                       const totalIndependent = matchingForStats.length - totalCampaign;
 
                       return (
@@ -2906,11 +2921,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                     <button
                       type="button"
                       onClick={() => setFilterViewMode("categories")}
-                      className={`w-full max-w-[200px] py-2.5 px-6 rounded-full font-serif italic text-lg sm:text-xl font-medium transition-all duration-300 cursor-pointer shadow-md text-center select-none ${
-                        filterViewMode === "categories"
-                          ? "bg-[#352a21] hover:bg-[#ff5722] hover:text-white text-[#f4efe5] border border-[#5a4638] hover:border-orange-400/40 hover:shadow-orange-950/50 hover:scale-105"
-                          : "bg-[#352a21] hover:bg-[#ff5722] hover:text-white text-[#f4efe5] border border-[#5a4638] hover:border-orange-400/40 hover:shadow-orange-950/50 hover:scale-105"
-                      }`}
+                      className="w-full max-w-[200px] py-2.5 px-6 rounded-full font-serif italic text-lg sm:text-xl font-medium transition-all duration-300 cursor-pointer shadow-md text-center select-none bg-[#352a21] hover:bg-[#ff5722] hover:text-white text-[#f4efe5] border border-[#5a4638] hover:border-orange-400/40 hover:shadow-orange-950/50 hover:scale-105"
                     >
                       Categories
                     </button>
@@ -3014,20 +3025,20 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                       </svg>
                     </div>
 
-                    {/* Priority & Status Pill Button */}
+                    {/* Urgency & Order Pill Button */}
                     <button
                       type="button"
                       onClick={() => setFilterViewMode("priority")}
                       className="w-full max-w-[200px] py-2.5 px-4 rounded-full font-serif italic text-lg sm:text-xl font-medium transition-all duration-300 cursor-pointer shadow-md text-center select-none whitespace-nowrap bg-[#352a21] hover:bg-[#ff5722] hover:text-white text-[#f4efe5] border border-[#5a4638] hover:border-orange-400/40 hover:shadow-orange-950/50 hover:scale-105"
                     >
-                      Priority & Status
+                      Urgency & Order
                     </button>
                   </div>
 
                 </div>
 
                 {/* Sub-Filters for Location & Priority */}
-                {filterViewMode === "location" && (
+                {(filterViewMode as string) === "location" && (
                   <div className="pt-4 border-t border-white/10 space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-mono uppercase tracking-wider text-yellow-400 font-bold">
@@ -3070,29 +3081,27 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                   </div>
                 )}
 
-                {filterViewMode === "priority" && (
+                {(filterViewMode as string) === "priority" && (
                   <div className="pt-4 border-t border-white/10 space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-mono uppercase tracking-wider text-yellow-400 font-bold">
-                        Filter by Urgency & Status:
+                        Filter by Urgency Level:
                       </span>
                       {selectedPriorityFilter !== "ALL" && (
                         <button
                           onClick={() => setSelectedPriorityFilter("ALL")}
                           className="text-[11px] font-mono text-white/70 hover:text-white underline cursor-pointer"
                         >
-                          Reset priority filter
+                          Reset urgency filter
                         </button>
                       )}
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {[
-                        { id: "ALL", label: "All Priorities" },
-                        { id: "EMERGENCY", label: "🚨 Emergency Only" },
-                        { id: "HIGH", label: "⚡ High Urgency" },
-                        { id: "STANDARD", label: "📦 Standard" },
-                        { id: "ACTIVE", label: "🟢 Active Needs" },
-                        { id: "FULFILLED", label: "✅ Fulfilled" },
+                        { id: "ALL", label: "All Urgency Levels" },
+                        { id: "STANDARD", label: "📦 Standard Aid" },
+                        { id: "IMPORTANT", label: "⚡ Important Need" },
+                        { id: "EMERGENCY", label: "🚨 Emergency Need" },
                       ].map((item) => {
                         const isSelected = selectedPriorityFilter === item.id;
                         return (
@@ -3119,7 +3128,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
         )}
       </AnimatePresence>
 
-      {/* SECTION SUBTITLE: All Requests: Suggested For You (Personalized Recommendations) */}
+      {/* SECTION SUBTITLE */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 pt-4">
         
         <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-white/10 pb-3 mb-6">
@@ -3127,11 +3136,11 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
             <h2 className="text-2xl sm:text-3xl font-serif italic text-[#f4efe5] font-semibold tracking-tight">
               {searchQuery.trim() ? `Search: "${searchQuery}"` : "All Requests:"}
             </h2>
-            <span className="text-xs sm:text-sm text-[#f4efe5]/70 font-sans">
-              {searchQuery.trim()
-                ? "Matching title, campaign name, labels, and item keywords"
-                : "Suggested For You (Personalized Recommendations)"}
-            </span>
+            {searchQuery.trim() && (
+              <span className="text-xs sm:text-sm text-[#f4efe5]/70 font-sans">
+                Matching title, campaign name, labels, and item keywords
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -3276,7 +3285,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                       }}
                       className="text-xl sm:text-2xl font-serif italic font-bold tracking-tight text-white line-clamp-1 hover:text-yellow-300 transition-colors cursor-pointer"
                     >
-                      {req.title}
+                      {formatCapitalizedTitle(req.title)}
                     </h3>
 
                     {/* 3. CATEGORY BADGES */}
@@ -3309,7 +3318,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
 
                       <div className="text-right">
                         <span className="text-[10px] font-mono text-white/60 uppercase tracking-wider font-semibold block">
-                          {req.postedDate || "2 DAYS AGO"}
+                          {formatRequestPostedDate(req.postedDate, req.postedTimestamp)}
                         </span>
                       </div>
                     </div>
@@ -3392,14 +3401,24 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                         type="button"
                         onClick={(e) => handleAddToDonateBox(req, e)}
                         className={`p-2 rounded-full transition-all cursor-pointer relative ${
-                          donateBoxItems.some((item) => item.requestId === req.id)
+                          donateBoxItems.some(
+                            (item) => item.requestId === req.id
+                          )
                             ? "text-yellow-300 bg-white/20 ring-1 ring-yellow-300/60 shadow"
                             : "text-white/80 hover:text-white hover:bg-white/15"
                         }`}
-                        title="Collect into Donate Box list"
+                        title={
+                          donateBoxItems.some(
+                            (item) => item.requestId === req.id
+                          )
+                            ? "Remove from Donate Box"
+                            : "Add to Donate Box"
+                        }
                       >
                         <Package className="w-5 h-5" />
-                        {donateBoxItems.some((item) => item.requestId === req.id) && (
+                        {donateBoxItems.some(
+                          (item) => item.requestId === req.id
+                        ) && (
                           <span className="absolute -top-1 -right-1 w-4 h-4 bg-yellow-400 text-black text-[9px] font-bold rounded-full flex items-center justify-center shadow">
                             ✓
                           </span>
@@ -3410,7 +3429,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                     {/* Right CTA: SUPPORT NOW Button (Vibrant gradient/cyan) */}
                     <button
                       type="button"
-                      onClick={(e) => handleOpenSupportModal(req, e)}
+                      onClick={(e) => handleSupportNowAndNavigate(req, e)}
                       className="bg-gradient-to-r from-[#60a5fa] via-[#38bdf8] to-[#22d3ee] hover:brightness-110 text-[#0f172a] font-bold text-xs uppercase tracking-wider py-2.5 px-6 rounded-full shadow-xl transition-all duration-300 hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-1.5"
                     >
                       <span>SUPPORT NOW</span>
@@ -3452,7 +3471,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                     <span>Pledge In-Kind Support</span>
                   </span>
                   <h3 className="text-xl sm:text-2xl font-serif italic font-bold text-white">
-                    {selectedSupportReq.title}
+                    {formatCapitalizedTitle(selectedSupportReq.title)}
                   </h3>
                   <p className="text-xs text-[#f4efe5]/70 flex items-center gap-1">
                     <MapPin className="w-3.5 h-3.5 text-yellow-400" />
@@ -3833,7 +3852,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
                           </div>
 
                           <h4 className="font-serif italic font-bold text-xs sm:text-sm text-white truncate">
-                            {item.title}
+                            {formatCapitalizedTitle(item.title)}
                           </h4>
 
                           <p className="text-[10px] font-mono text-white/60">
@@ -4026,7 +4045,7 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
               className="relative max-w-4xl max-h-[85vh] bg-black/90 rounded-3xl p-4 border border-white/20 shadow-2xl z-10 flex flex-col items-center"
             >
               <div className="w-full flex justify-between items-center pb-3 border-b border-white/10">
-                <span className="font-serif italic font-bold text-sm text-white">{lightboxImage.title}</span>
+                <span className="font-serif italic font-bold text-sm text-white">{formatCapitalizedTitle(lightboxImage.title)}</span>
                 <button
                   type="button"
                   onClick={() => setLightboxImage(null)}
@@ -4052,9 +4071,13 @@ export default function AppNeeds({ navigateToView }: AppNeedsProps) {
         isOpen={Boolean(selectedDetailRequest)}
         onClose={() => setSelectedDetailRequest(null)}
         onAddToDonateBox={(req) => handleAddToDonateBox(req)}
-        onSupportNow={(req) => handleOpenSupportModal(req)}
+        onRemoveFromDonateBox={(req) => handleRemoveRequestFromDonateBox(req)}
+        onSupportNow={(req) => handleSupportNowAndNavigate(req)}
         isInDonateBox={Boolean(
-          selectedDetailRequest && donateBoxItems.some((item) => item.requestId === selectedDetailRequest.id)
+          selectedDetailRequest &&
+          donateBoxItems.some(
+            (item) => item.requestId === selectedDetailRequest.id
+          )
         )}
         onShare={(req) => handleShareRequest(req)}
         onOpenDonateBoxPage={() => handleNavigateToDonateBoxPage()}

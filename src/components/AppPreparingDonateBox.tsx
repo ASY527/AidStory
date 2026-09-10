@@ -16,7 +16,6 @@ import {
   Store,
   Award,
   Package,
-  Gift,
   HeartHandshake,
   Calendar,
   Clock,
@@ -29,7 +28,13 @@ import {
 } from "lucide-react";
 import { RequestDetailModal } from "./RequestDetailModal";
 import { DEFAULT_NEEDS_REQUESTS } from "./AppNeeds";
-import { RecipientRequest } from "../types";
+import { RecipientRequest, formatCapitalizedTitle } from "../types";
+import {
+  updateRequestInCloud,
+  savePledgeToCloud,
+  saveDeliveryPackageToCloud,
+  saveUserDonationToCloud
+} from "../lib/cloudService";
 
 export interface DonateBoxCartItem {
   id: string;
@@ -50,7 +55,7 @@ export interface DonateBoxCartItem {
 }
 
 interface AppPreparingDonateBoxProps {
-  navigateToView: (view: "home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box") => void;
+  navigateToView: (view: "home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box" | "delivery_status") => void;
 }
 
 const INITIAL_STARTER_ITEMS: DonateBoxCartItem[] = [
@@ -149,6 +154,7 @@ const VERIFIED_DROPOFF_HUBS = [
 
 // Helper to resolve the authentic requesting NGO/Charity organization name
 export const getExactOrganizerForRequest = (requestId?: string, title?: string, existingOrg?: string): string => {
+  const normalizedTitle = title?.toLowerCase().trim();
   const genericDefaults = [
     "Hope Community Aid (NGO)",
     "AidStory Verified Hub",
@@ -160,9 +166,9 @@ export const getExactOrganizerForRequest = (requestId?: string, title?: string, 
 
   // 1. Check DEFAULT_NEEDS_REQUESTS first
   const found = DEFAULT_NEEDS_REQUESTS.find(
-    (r) =>
-      (requestId && r.id === requestId) ||
-      (title && r.title.toLowerCase().trim() === title.toLowerCase().trim())
+    (r) => requestId
+      ? r.id === requestId
+      : Boolean(normalizedTitle) && r.title.toLowerCase().trim() === normalizedTitle
   );
   if (found && found.organizerName) {
     return found.organizerName;
@@ -173,11 +179,11 @@ export const getExactOrganizerForRequest = (requestId?: string, title?: string, 
     const saved = localStorage.getItem("aidstory_recipient_requests");
     if (saved) {
       const parsed: RecipientRequest[] = JSON.parse(saved);
-      const matched = parsed.find(
-        (r) =>
-          (requestId && r.id === requestId) ||
-          (title && r.title.toLowerCase().trim() === title.toLowerCase().trim())
-      );
+    const matched = parsed.find(
+      (r) => requestId
+        ? r.id === requestId
+        : Boolean(normalizedTitle) && r.title.toLowerCase().trim() === normalizedTitle
+    );
       if (matched && matched.organizerName) {
         return matched.organizerName;
       }
@@ -254,22 +260,38 @@ export const getExactOrganizerForRequest = (requestId?: string, title?: string, 
   return "Sibu Animal Hope Shelter (NGO)";
 };
 
-// Helper to ensure high-resolution, working thumbnail images
-export const getValidItemImageUrl = (url?: string, title?: string): string => {
-  const t = (title || "").toLowerCase();
-  if (t.includes("pamper") || t.includes("baby") || t.includes("diaper")) {
-    return "https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?auto=format&fit=crop&w=400&q=80";
-  }
-  if (t.includes("dog") || t.includes("animal")) {
-    return "https://images.unsplash.com/photo-1589924691995-400dc9ecc119?auto=format&fit=crop&w=400&q=80";
-  }
-  if (t.includes("lego") || t.includes("toy")) {
-    return "https://images.unsplash.com/photo-1587654780291-39c9404d746b?auto=format&fit=crop&w=400&q=80";
-  }
-  if (t.includes("storybook") || t.includes("book")) {
-    return "https://images.unsplash.com/photo-1512820790803-83ca734da794?auto=format&fit=crop&w=400&q=80";
-  }
-  if (!url || url.includes("photo-1594824813689") || url.trim() === "") {
+// Store the request owner on every new package. This lets the requester view
+// their delivery on another device without relying on an organization-name match.
+export const getRequesterEmailForRequest = (requestId?: string, title?: string): string | undefined => {
+  const normalizedTitle = title?.toLowerCase().trim();
+  const findOwner = (requests: RecipientRequest[]) => {
+    const request = requests.find(
+      (r) => requestId
+        ? r.id === requestId
+        : Boolean(normalizedTitle) && r.title.toLowerCase().trim() === normalizedTitle
+    );
+    return request?.authorEmail || request?.createdByUserEmail || (request as any)?.recipientEmail || (request as any)?.ownerEmail;
+  };
+
+  const defaultOwner = findOwner(DEFAULT_NEEDS_REQUESTS);
+  if (defaultOwner) return defaultOwner.toLowerCase().trim();
+
+  try {
+    for (const key of ["aidstory_all_needs", "aidstory_recipient_requests"]) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const owner = findOwner(JSON.parse(raw) as RecipientRequest[]);
+      if (owner) return owner.toLowerCase().trim();
+    }
+  } catch (e) {}
+
+  return undefined;
+};
+
+// Preserve the image selected by the request owner. A fallback is used only
+// when a request has no image, never based on keywords in its title.
+export const getValidItemImageUrl = (url?: string, _title?: string): string => {
+  if (!url || url.trim() === "") {
     return "https://images.unsplash.com/photo-1532629345422-7515f3d16bb9?auto=format&fit=crop&w=400&q=80";
   }
   return url;
@@ -283,7 +305,7 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
         if (saved) return JSON.parse(saved);
       } catch (e) {}
     }
-    return { name: "Nadine", email: "nadine@aidstory.org" };
+    return null;
   });
 
   const [cartItems, setCartItems] = useState<DonateBoxCartItem[]>(() => {
@@ -311,7 +333,9 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
         }
       } catch (e) {}
     }
-    return INITIAL_STARTER_ITEMS;
+    // A guest starts with an empty box; starter items are for signed-in users
+    // only and must not appear as retained guest activity.
+    return currentUser ? INITIAL_STARTER_ITEMS : [];
   });
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -320,25 +344,21 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
   const [editingNoteItem, setEditingNoteItem] = useState<DonateBoxCartItem | null>(null);
   const [noteInputText, setNoteInputText] = useState("");
 
-  const [isComboModalOpen, setIsComboModalOpen] = useState(false);
-  const [comboTargetStore, setComboTargetStore] = useState("");
-
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const [isCheckoutSuccess, setIsCheckoutSuccess] = useState(false);
-  const [deliveryMethod, setDeliveryMethod] = useState<"courier" | "dropoff" | "volunteer">("courier");
+  const [deliveryMethod, setDeliveryMethod] = useState<"courier" | "dropoff">("courier");
 
   // FORM STATES FOR FULFILLMENT & SCHEDULING
   const [pickupDate, setPickupDate] = useState<string>(() => getFutureDateStr(1));
   const [pickupTimeSlot, setPickupTimeSlot] = useState<string>("09:00 - 12:00 (Morning Slot)");
   const [pickupAddress, setPickupAddress] = useState<string>("12, Jalan Sultan Iskandar, 30000 Ipoh, Perak");
-  const [pickupPhone, setPickupPhone] = useState<string>("+60 12-3456789");
+  const [pickupPhone, setPickupPhone] = useState<string>("60123456789");
 
   const [dropoffDate, setDropoffDate] = useState<string>(() => getFutureDateStr(1));
   const [dropoffTimeSlot, setDropoffTimeSlot] = useState<string>("10:00 - 14:00 (Morning / Midday)");
-  const [dropoffHubId, setDropoffHubId] = useState<string>("hub_ipoh");
-
-  const [volunteerDate, setVolunteerDate] = useState<string>(() => getFutureDateStr(1));
-  const [volunteerTimeSlot, setVolunteerTimeSlot] = useState<string>("14:00 - 17:00 (Afternoon Slot)");
+  // Direct charity handover is the default; verified centres remain available
+  // for donors who prefer a staffed drop-off point.
+  const [dropoffHubId, setDropoffHubId] = useState<string>("charity_address");
   const [scheduleNotes, setScheduleNotes] = useState<string>("");
 
   // Modal for Viewing Item Details
@@ -346,6 +366,11 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
 
   const selectedDropoffHub =
     VERIFIED_DROPOFF_HUBS.find((h) => h.id === dropoffHubId) || VERIFIED_DROPOFF_HUBS[0];
+  const isCharityDropoff = dropoffHubId === "charity_address";
+  const getDropoffDestination = (item: DonateBoxCartItem) =>
+    isCharityDropoff
+      ? { name: item.organizerName || "Requesting charity", address: item.location }
+      : selectedDropoffHub;
 
   const handleOpenItemDetail = (item: DonateBoxCartItem) => {
     let allRequests: RecipientRequest[] = [];
@@ -362,16 +387,12 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
 
     // Match by request ID or title
     let found = allRequests.find(
-      (r) =>
-        r.id === item.requestId ||
-        r.title.toLowerCase().trim() === item.title.toLowerCase().trim()
+      (r) => item.requestId ? r.id === item.requestId : r.title.toLowerCase().trim() === item.title.toLowerCase().trim()
     );
 
     if (!found) {
       found = DEFAULT_NEEDS_REQUESTS.find(
-        (r) =>
-          r.id === item.requestId ||
-          r.title.toLowerCase().trim() === item.title.toLowerCase().trim()
+        (r) => item.requestId ? r.id === item.requestId : r.title.toLowerCase().trim() === item.title.toLowerCase().trim()
       );
     }
 
@@ -395,23 +416,8 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
         brand: item.brand || "Standard",
         color: item.color || "Any",
         organizerName: item.organizerName || "Hope Community Aid (NGO)",
-        updates: [
-          {
-            id: "up_donate_1",
-            date: "3/5/2026",
-            text: "Currently receiving pledges for these essential relief supplies. Thank you for your support!",
-            author: item.organizerName || "Relief Coordinator"
-          }
-        ],
-        comments: [
-          {
-            id: "comm_donate_1",
-            userName: "IamDonor1",
-            avatarUrl: "https://images.unsplash.com/photo-1517256064527-09c73fc73e38?auto=format&fit=crop&w=150&q=80",
-            comment: "Hope to hear good news. Prepared a care box for this campaign!",
-            date: "2h ago"
-          }
-        ]
+        updates: [],
+        comments: []
       };
     }
 
@@ -503,6 +509,14 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
 
   const allChecked = cartItems.length > 0 && cartItems.every((item) => item.checked);
   const checkedItems = cartItems.filter((item) => item.checked);
+  const charityDestinations = Array.from(
+    new Map<string, { name: string; address: string }>(
+      checkedItems.map((item) => [
+        `${item.organizerName || "Requesting charity"}|${item.location}`,
+        { name: item.organizerName || "Requesting charity", address: item.location }
+      ])
+    ).values()
+  );
 
   const handleToggleSelectAll = () => {
     const nextState = !allChecked;
@@ -584,15 +598,67 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
           const updated = requests.map((r: any) => {
             const matchedCartItem = checkedItems.find((ci) => ci.requestId === r.id);
             if (matchedCartItem) {
-              const nextPledged = Math.min(r.quantity, (r.pledgedQuantity || 0) + matchedCartItem.quantity);
+              const pledged = Math.max(0, r.pledgedQuantity || 0);
+              const received = Math.min(
+                pledged,
+                Math.max(0, r.receivedQuantity ?? Math.floor(pledged * 0.4))
+              );
+              const inTransit = Math.min(
+                Math.max(0, pledged - received),
+                Math.max(0, r.inTransitQuantity ?? pledged - received)
+              );
+              const nextPledged = Math.min(r.quantity, pledged + matchedCartItem.quantity);
+              // A new donation remains yellow/in transit until the recipient
+              // explicitly confirms receipt from their delivery view.
+              const nextInTransit = Math.min(
+                Math.max(0, nextPledged - received),
+                inTransit + matchedCartItem.quantity
+              );
               const nextStatus = nextPledged >= r.quantity ? "fulfilled" : r.status;
-              return { ...r, pledgedQuantity: nextPledged, status: nextStatus };
+              return {
+                ...r,
+                pledgedQuantity: nextPledged,
+                receivedQuantity: received,
+                inTransitQuantity: nextInTransit,
+                status: nextStatus
+              };
             }
             return r;
           });
           localStorage.setItem("aidstory_recipient_requests", JSON.stringify(updated));
         }
       } catch (err) {}
+
+      // Cloud Firestore synchronization for checked items
+      checkedItems.forEach((item) => {
+        if (item.requestId) {
+          // Use the newly updated local request totals, rather than replacing
+          // the pledge amount with this individual cart item's quantity.
+          try {
+            const requests = JSON.parse(localStorage.getItem("aidstory_recipient_requests") || "[]");
+            const request = requests.find((r: RecipientRequest) => r.id === item.requestId);
+            if (request) {
+              updateRequestInCloud(item.requestId, {
+                pledgedQuantity: request.pledgedQuantity,
+                receivedQuantity: request.receivedQuantity,
+                inTransitQuantity: request.inTransitQuantity,
+                status: request.status
+              }).catch((err) => console.warn("Cloud request update failed:", err));
+            }
+          } catch (err) {}
+
+          savePledgeToCloud({
+            requestId: item.requestId,
+            donorName: "Anonymous Community Donor",
+            donorContact: "",
+            donorNote: item.donorNote || "",
+            quantity: item.quantity,
+            deliveryMethod: deliveryMethod,
+            status: "Delivered",
+            createdAt: new Date().toISOString()
+          }).catch((err) => console.warn("Cloud pledge save failed:", err));
+        }
+      });
 
       try {
         const savedPledgesJSON = localStorage.getItem("aidstory_user_pledged_items") || "[]";
@@ -609,60 +675,210 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
         const savedCompletedJSON = localStorage.getItem("aidstory_completed_donations") || "[]";
         const savedCompleted: any[] = JSON.parse(savedCompletedJSON);
         checkedItems.forEach((item) => {
-          savedCompleted.push({
+          const donationRecord = {
             id: `donate-box-${Date.now()}-${item.id}`,
             type: "donate_box_cart",
+            userEmail: currentUser?.email || "anonymous@aidstory.org",
             title: item.title,
             category: item.category,
-            quantity: item.quantity,
+            quantity: `${item.quantity} ${item.unit}`,
             unit: item.unit,
-            date: new Date().toISOString(),
-            status: "completed",
+            date: new Date().toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" }),
+            status: "In Preparation",
             deliveryMethod,
             scheduleDetails: {
               method: deliveryMethod,
-              date: deliveryMethod === "courier" ? pickupDate : deliveryMethod === "dropoff" ? dropoffDate : volunteerDate,
-              timeSlot: deliveryMethod === "courier" ? pickupTimeSlot : deliveryMethod === "dropoff" ? dropoffTimeSlot : volunteerTimeSlot,
-              hub: deliveryMethod === "dropoff" ? selectedDropoffHub.name : "Perak Regional Hub",
+              date: deliveryMethod === "courier" ? pickupDate : dropoffDate,
+              timeSlot: deliveryMethod === "courier" ? pickupTimeSlot : dropoffTimeSlot,
+              hub: deliveryMethod === "dropoff"
+                ? (isCharityDropoff ? "Requesting charity address" : selectedDropoffHub.name)
+                : "Perak Regional Hub",
               estimatedDelivery:
                 deliveryMethod === "dropoff"
                   ? formatReadableDate(dropoffDate, 0)
                   : formatReadableDate(pickupDate, 2)
             }
-          });
+          };
+          savedCompleted.push(donationRecord);
+          // Auto-sync donation history to Cloud Firestore
+          saveUserDonationToCloud({
+            id: donationRecord.id,
+            userEmail: currentUser?.email || "anonymous@aidstory.org",
+            title: donationRecord.title,
+            category: donationRecord.category,
+            quantity: donationRecord.quantity,
+            date: donationRecord.date,
+            status: donationRecord.status
+          }).catch((err) => console.warn("Cloud donation save error:", err));
         });
         localStorage.setItem("aidstory_completed_donations", JSON.stringify(savedCompleted));
       } catch (err) {}
 
+      // Sync checked out items into Delivery Status Packages (aidstory_delivery_packages)
+      try {
+        const existingPkgsRaw = localStorage.getItem("aidstory_delivery_packages");
+        let existingPkgs: any[] = [];
+        if (existingPkgsRaw) {
+          existingPkgs = JSON.parse(existingPkgsRaw);
+        }
+        
+        checkedItems.forEach((item, idx) => {
+          const trackId = `AID-MY-${(Date.now() + idx).toString().slice(-6)}`;
+          const newPackage = {
+            id: `del_pledge_${Date.now()}_${item.id}`,
+            trackingId: trackId,
+            type: "donate" as const,
+            requestId: item.requestId,
+            itemTitle: item.title,
+            category: item.category,
+            quantity: item.quantity,
+            unit: item.unit,
+            imageUrl: item.imageUrl,
+            brand: item.brand || "Standard Relief",
+            color: item.color || "Standard",
+            donorName: currentUser?.username || "You (Donor)",
+            donorEmail: currentUser?.email || "donor@aidstory.org",
+            donorNote: item.donorNote || scheduleNotes || "Handled with care for community aid.",
+            receiverName: item.organizerName || "Hope Community Aid (NGO)",
+            requesterEmail: getRequesterEmailForRequest(item.requestId, item.title),
+            receiverLocation: item.location || "Regional Relief Hub",
+            receiverHub: deliveryMethod === "dropoff" ? getDropoffDestination(item).name : "Perak Distribution Hub",
+            deliveryMethod: deliveryMethod === "dropoff" ? ("dropoff" as const) : ("courier" as const),
+            courierProvider: deliveryMethod === "courier" ? "J&T Cargo Express" : undefined,
+            trackingNumber: deliveryMethod === "courier" ? `MY${Date.now().toString().slice(-8)}` : trackId,
+            scheduledDate: deliveryMethod === "courier" ? pickupDate : dropoffDate,
+            scheduledTimeSlot: deliveryMethod === "courier" ? pickupTimeSlot : dropoffTimeSlot,
+            dropoffHubName: deliveryMethod === "dropoff" ? getDropoffDestination(item).name : undefined,
+            dropoffHubAddress: deliveryMethod === "dropoff" ? getDropoffDestination(item).address : undefined,
+            isDirectCharityDropoff: deliveryMethod === "dropoff" && isCharityDropoff,
+            estimatedDeliveryDate: deliveryMethod === "dropoff" ? formatReadableDate(dropoffDate, 0) : formatReadableDate(pickupDate, 2),
+            // A pledge starts before the donor has prepared the package.
+            // The donor confirms the next preparation stage from Delivery Status.
+            currentStage: "pledged" as const,
+            stageProgressPercent: 25,
+            lastUpdated: "Just now",
+            timeline: [
+              {
+                id: `evt_${Date.now()}`,
+                stage: "pledged" as const,
+                title: "Donation Pledged & Box Sealed",
+                description: `Pledged ${item.quantity} ${item.unit} via ${deliveryMethod === "courier" ? "Courier Pickup" : isCharityDropoff ? "Direct Charity Drop-off" : "Verified Hub Drop-off"}.`,
+                timestamp: new Date().toLocaleString("en-US", {
+                  day: "numeric",
+                  month: "short",
+                  year: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit"
+                }),
+                updatedBy: "Donor"
+              }
+            ]
+          };
+          existingPkgs.unshift(newPackage);
+          // Auto-sync delivery package to Cloud Firestore
+          saveDeliveryPackageToCloud(newPackage).catch((err) => console.warn("Cloud package save error:", err));
+        });
+
+        localStorage.setItem("aidstory_delivery_packages", JSON.stringify(existingPkgs));
+      } catch (err) {}
+
       const remainingUnchecked = cartItems.filter((item) => !item.checked);
       saveCart(remainingUnchecked);
+
+      try {
+        window.dispatchEvent(new Event("aidstory_donations_updated"));
+        window.dispatchEvent(new Event("aidstory_cart_checkout_completed"));
+      } catch (e) {}
 
       setIsCheckingOut(false);
       setIsCheckoutSuccess(true);
     }, 700);
   };
 
-  const handleAddComboItem = (storeName: string) => {
-    const comboItem: DonateBoxCartItem = {
-      id: `combo_${Date.now()}`,
-      requestId: `combo_req_${Date.now()}`,
-      title: `Matching Relief Kit Item for ${storeName}`,
-      category: "Household",
-      imageUrl: "https://images.unsplash.com/photo-1584100936595-c0654b55a2e2?auto=format&fit=crop&w=400&q=80",
-      location: "Perak Distribution Hub",
-      unit: "packs",
-      quantity: 1,
-      maxNeeded: 5,
-      organizerName: storeName,
-      brand: "Relief Essentials",
-      color: "Standard",
-      urgencyLevel: "medium",
-      donorNote: "",
-      checked: true
-    };
-    saveCart([...cartItems, comboItem]);
-    setIsComboModalOpen(false);
-  };
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-[#1c1510] text-[#f4efe5] font-sans antialiased flex flex-col justify-between selection:bg-[#785d47] selection:text-white">
+        <header className="bg-[#140e0a] text-[#f4efe5] border-b border-[#36271e] px-4 py-3.5 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => navigateToView("main_menu")}
+            className="flex items-center gap-2 text-[#e8dcc8] hover:text-white transition-colors cursor-pointer"
+          >
+            <div className="w-9 h-9 rounded-xl bg-[#2e2017] border border-[#523d2e] text-[#d4b292] flex items-center justify-center">
+              <ShoppingBag className="w-5 h-5 text-[#d4b292]" />
+            </div>
+            <span className="font-serif italic font-extrabold text-xl text-[#f4efe5]">
+              AidStory
+            </span>
+          </button>
+          <button
+            onClick={() => navigateToView("main_menu")}
+            className="px-4 py-1.5 rounded-full bg-white/5 hover:bg-white/15 text-xs font-mono text-[#f4efe5] border border-white/10 transition-all cursor-pointer"
+          >
+            Back to Menu
+          </button>
+        </header>
+
+        <div className="flex-1 flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-[380px] bg-[#423a31] p-8 sm:p-9 rounded-[28px] border border-white/10 shadow-2xl text-center text-[#f4efe5]"
+          >
+            <div className="relative w-28 h-28 mx-auto mb-3 flex items-center justify-center">
+              <svg className="w-24 h-24" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path
+                  d="M 32 46 V 32 C 32 21 40 14 50 14 C 60 14 68 21 68 32 V 46"
+                  stroke="#e2e8f0"
+                  strokeWidth="8"
+                  strokeLinecap="round"
+                  fill="none"
+                />
+                <rect
+                  x="22"
+                  y="42"
+                  width="56"
+                  height="46"
+                  rx="12"
+                  fill="#ff8800"
+                  stroke="#cc6600"
+                  strokeWidth="3.5"
+                />
+                <circle cx="50" cy="61" r="5" fill="#423a31" />
+                <path d="M 48 64 L 46 75 H 54 L 52 64 Z" fill="#423a31" />
+              </svg>
+            </div>
+
+            <h3 className="text-2xl sm:text-3xl font-serif text-[#f4efe5] font-medium tracking-tight mb-2">
+              Locked.
+            </h3>
+            <p className="text-sm sm:text-base text-[#f4efe5]/85 font-sans mb-6 leading-relaxed">
+              login/sign up to unlock
+            </p>
+
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={() => navigateToView("home")}
+                className="w-full py-3 bg-[#ff5500] hover:bg-[#ff6600] text-white font-bold text-sm sm:text-base rounded-full shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
+              >
+                Login / Sign Up
+              </button>
+              <button
+                onClick={() => navigateToView("main_menu")}
+                className="w-full py-2.5 bg-white/10 hover:bg-white/15 text-[#f4efe5] text-xs font-mono rounded-full transition-all cursor-pointer"
+              >
+                Return to Main Menu
+              </button>
+            </div>
+          </motion.div>
+        </div>
+
+        <footer className="text-center py-4 text-xs font-mono text-white/40">
+          AidStory © 2026 • Real-Time Relief Logistics
+        </footer>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#201812] text-[#f5efe6] font-sans antialiased pb-24 selection:bg-[#785d47] selection:text-white">
@@ -786,22 +1002,30 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                   Donation Package Dispatched Successfully!
                 </h4>
                 <p className="text-xs text-[#c8b7a6] mt-0.5">
-                  Scheduled for {deliveryMethod === "courier" ? `Courier Pick-up on ${formatReadableDate(pickupDate)}` : deliveryMethod === "dropoff" ? `Direct Drop-off at ${selectedDropoffHub.name} on ${formatReadableDate(dropoffDate)}` : `Volunteer Pick-up on ${formatReadableDate(volunteerDate)}`}. Tracking ID: <span className="font-mono font-bold text-[#d4b292]">AID-MY-{Date.now().toString().slice(-6)}</span>
+                  Scheduled for {deliveryMethod === "courier" ? `Courier Pick-up on ${formatReadableDate(pickupDate)}` : `Direct Drop-off at ${isCharityDropoff ? "the requesting charity" : selectedDropoffHub.name} on ${formatReadableDate(dropoffDate)}`}. Tracking ID: <span className="font-mono font-bold text-[#d4b292]">AID-MY-{Date.now().toString().slice(-6)}</span>
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 shrink-0 flex-wrap">
+              <button
+                type="button"
+                onClick={() => navigateToView("delivery_status")}
+                className="px-4 py-2 bg-gradient-to-r from-amber-400 to-yellow-400 hover:from-amber-300 hover:to-yellow-300 text-black text-xs font-bold rounded-xl transition-all cursor-pointer shadow-md flex items-center gap-1.5"
+              >
+                <Truck className="w-4 h-4" />
+                <span>Track Delivery Status</span>
+              </button>
               <button
                 type="button"
                 onClick={() => navigateToView("needs")}
-                className="px-4 py-2 bg-[#5c4637] hover:bg-[#705644] text-[#f5efe6] text-xs font-bold rounded-xl transition-colors cursor-pointer shadow-md"
+                className="px-3.5 py-2 bg-[#5c4637] hover:bg-[#705644] text-[#f5efe6] text-xs font-bold rounded-xl transition-colors cursor-pointer shadow-md"
               >
                 Browse More Needs
               </button>
               <button
                 type="button"
                 onClick={() => setIsCheckoutSuccess(false)}
-                className="px-3.5 py-2 bg-[#1c140f] text-[#c8b7a6] hover:text-white text-xs font-bold rounded-xl transition-colors cursor-pointer border border-[#3e2e23]"
+                className="px-3 py-2 bg-[#1c140f] text-[#c8b7a6] hover:text-white text-xs font-bold rounded-xl transition-colors cursor-pointer border border-[#3e2e23]"
               >
                 Dismiss
               </button>
@@ -825,14 +1049,14 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                 <span className="text-xs text-[#c8b7a6]">{cartItems.length} items</span>
               </div>
 
-              {/* Free Volunteer Courier & Logistics Banner (Warm Espresso Velvet Tone) */}
+              {/* Free courier and direct drop-off logistics banner */}
               <div className="bg-[#2b211a] border border-[#443328] text-[#e8dcc8] px-4 py-3 rounded-2xl flex items-center justify-between text-xs shadow-md">
                 <div className="flex items-center gap-2.5">
                   <div className="w-6 h-6 rounded-full bg-[#4a392e] text-[#d4b292] flex items-center justify-center shrink-0 shadow-xs border border-[#5e493b]">
                     <Truck className="w-3.5 h-3.5" />
                   </div>
                   <span className="font-medium text-[#f5efe6]">
-                    Free volunteer courier pick-up & direct relief shelter dispatch included
+                    Free courier pick-up and direct drop-off to a charity or verified centre included
                   </span>
                 </div>
                 <Info className="w-4 h-4 text-[#a8896c] shrink-0 cursor-pointer hover:opacity-80" />
@@ -902,26 +1126,6 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                       </span>
                     </div>
 
-                    {/* Combo Add-on Bar */}
-                    <div className="bg-[#1f1711] px-4 py-2.5 border-b border-[#36271e] flex items-center justify-between text-xs text-[#d4b292]">
-                      <div className="flex items-center gap-2 font-medium">
-                        <span className="bg-[#443327] text-[#e8dcc8] text-[9px] font-bold px-1.5 py-0.5 rounded tracking-wide font-mono border border-[#594334]">
-                          BUNDLE
-                        </span>
-                        <span className="text-[#c8b7a6]">Add matching relief essentials to this care package</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setComboTargetStore(storeName);
-                          setIsComboModalOpen(true);
-                        }}
-                        className="font-bold text-[#d4b292] hover:text-white hover:underline cursor-pointer flex items-center gap-0.5 transition-colors"
-                      >
-                        + Add Item
-                      </button>
-                    </div>
-
                     {/* Product Rows */}
                     <div className="divide-y divide-[#36271e]">
                       {items.map((item) => (
@@ -960,7 +1164,7 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                                 className="text-left text-xs sm:text-sm font-serif font-bold text-[#f5efe6] hover:text-[#d4b292] line-clamp-2 leading-snug cursor-pointer transition-colors group flex items-center gap-1.5"
                                 title="Click to view details of item requested"
                               >
-                                <span>{item.title}</span>
+                                <span>{formatCapitalizedTitle(item.title)}</span>
                                 <ExternalLink className="w-3.5 h-3.5 opacity-60 group-hover:opacity-100 text-[#d4b292] shrink-0 transition-opacity" />
                               </button>
 
@@ -1125,7 +1329,7 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                       FREE (Subsidized)
                     </span>
                     <div className="text-[10px] text-[#a8896c]">
-                      100% Volunteer Dispatch
+                      100% Supported Dispatch
                     </div>
                   </div>
                 </div>
@@ -1143,7 +1347,7 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                   <span className="text-[10px] text-[#c8b7a6]">Select preferred handover</span>
                 </div>
 
-                <div className="grid grid-cols-3 gap-1.5 text-[10px]">
+                <div className="grid grid-cols-2 gap-1.5 text-[10px]">
                   <button
                     type="button"
                     onClick={() => setDeliveryMethod("courier")}
@@ -1170,18 +1374,6 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                     <span>Direct Drop-off</span>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setDeliveryMethod("volunteer")}
-                    className={`p-2.5 rounded-xl border text-center font-bold transition-all cursor-pointer flex flex-col items-center gap-1 ${
-                      deliveryMethod === "volunteer"
-                        ? "border-[#d4b292] bg-[#3e2e23] text-[#f5efe6] shadow-sm ring-1 ring-[#d4b292]/40"
-                        : "border-[#3e2e23] bg-[#1c140f] text-[#c8b7a6] hover:border-[#523e30]"
-                    }`}
-                  >
-                    <User className="w-3.5 h-3.5 text-[#d4b292]" />
-                    <span>Volunteer Team</span>
-                  </button>
                 </div>
               </div>
 
@@ -1288,7 +1480,8 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                         <span className="text-[9px] text-[#a8896c]">GPS Verified</span>
                       </label>
                       <input
-                        type="text"
+                        type="tel"
+                        required
                         value={pickupAddress}
                         onChange={(e) => setPickupAddress(e.target.value)}
                         placeholder="Enter full address for courier collection"
@@ -1304,8 +1497,12 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                       </label>
                       <input
                         type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]{7,15}"
+                        maxLength={15}
                         value={pickupPhone}
-                        onChange={(e) => setPickupPhone(e.target.value)}
+                        onChange={(e) => setPickupPhone(e.target.value.replace(/\D/g, ""))}
+                        placeholder="60123456789"
                         className="w-full bg-[#120d09] border border-[#443328] rounded-xl px-3 py-1.5 text-xs text-[#f5efe6] placeholder:text-[#6e5847] focus:border-[#d4b292] focus:outline-none"
                       />
                     </div>
@@ -1336,24 +1533,25 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                     <div className="flex items-center justify-between border-b border-[#36271e] pb-2">
                       <div className="flex items-center gap-1.5 text-xs font-serif font-bold text-[#f5efe6]">
                         <Building2 className="w-3.5 h-3.5 text-[#d4b292]" />
-                        <span>Direct Drop-off Center & Schedule</span>
+                        <span>Direct Drop-off Destination & Schedule</span>
                       </div>
                       <span className="text-[10px] text-[#d4b292] bg-[#3a2c22] px-1.5 py-0.5 rounded font-mono">
                         Direct Handover
                       </span>
                     </div>
 
-                    {/* Center Location Selection */}
+                    {/* Drop-off Destination Selection */}
                     <div className="space-y-1.5">
                       <label className="text-[11px] font-medium text-[#c8b7a6] flex items-center justify-between">
-                        <span>Select Verified Drop-off Center</span>
-                        <span className="text-[9px] text-[#a8896c]">Open Daily</span>
+                        <span>Select Drop-off Destination</span>
+                        <span className="text-[9px] text-[#a8896c]">Choose a hub or charity</span>
                       </label>
                       <select
                         value={dropoffHubId}
                         onChange={(e) => setDropoffHubId(e.target.value)}
                         className="w-full bg-[#120d09] border border-[#443328] rounded-xl px-3 py-2 text-xs text-[#f5efe6] focus:border-[#d4b292] focus:outline-none transition-colors cursor-pointer font-medium"
                       >
+                        <option value="charity_address">Requesting Charity Address (Direct Handover)</option>
                         {VERIFIED_DROPOFF_HUBS.map((hub) => (
                           <option key={hub.id} value={hub.id}>
                             {hub.name}
@@ -1361,17 +1559,31 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                         ))}
                       </select>
 
-                      {/* Selected Hub Info Box */}
-                      <div className="bg-[#150f0b] p-2.5 rounded-xl border border-[#36271e] text-[10px] text-[#c8b7a6] space-y-1">
-                        <div className="flex items-center gap-1 text-[#f5efe6] font-medium">
-                          <MapPin className="w-3 h-3 text-[#d4b292] shrink-0" />
-                          <span>{selectedDropoffHub.address}</span>
+                      {isCharityDropoff ? (
+                        <div className="bg-[#150f0b] p-2.5 rounded-xl border border-[#36271e] text-[10px] text-[#c8b7a6] space-y-2">
+                          <div className="flex items-center gap-1 text-[#f5efe6] font-medium">
+                            <MapPin className="w-3 h-3 text-[#d4b292] shrink-0" />
+                            <span>Deliver directly to the requesting charity</span>
+                          </div>
+                          {charityDestinations.map((destination) => (
+                            <div key={`${destination.name}-${destination.address}`} className="pl-4">
+                              <span className="text-[#f5efe6] font-semibold">{destination.name}: </span>
+                              <span>{destination.address || "Address supplied by the requester"}</span>
+                            </div>
+                          ))}
                         </div>
-                        <div className="flex items-center justify-between text-[#8e7b6d] pl-4">
-                          <span>Hours: {selectedDropoffHub.hours}</span>
-                          <span>Tel: {selectedDropoffHub.contact}</span>
+                      ) : (
+                        <div className="bg-[#150f0b] p-2.5 rounded-xl border border-[#36271e] text-[10px] text-[#c8b7a6] space-y-1">
+                          <div className="flex items-center gap-1 text-[#f5efe6] font-medium">
+                            <MapPin className="w-3 h-3 text-[#d4b292] shrink-0" />
+                            <span>{selectedDropoffHub.address}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-[#8e7b6d] pl-4">
+                            <span>Hours: {selectedDropoffHub.hours}</span>
+                            <span>Tel: {selectedDropoffHub.contact}</span>
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
 
                     {/* Drop-off Date */}
@@ -1456,66 +1668,10 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
                         </span>
                       </div>
                       <p className="text-[10px] text-[#c8b7a6] leading-relaxed">
-                        Direct drop-offs undergo immediate barcode verification and are marked as delivered into the shelter inventory on the <strong className="text-[#f5efe6]">same day ({formatReadableDate(dropoffDate)})</strong>.
+                        {isCharityDropoff
+                          ? "Hand the donation to the requesting charity at the address shown above. The recipient will confirm receipt in AidStory."
+                          : <>Verified-hub drop-offs undergo immediate barcode verification and are marked as delivered into the shelter inventory on the <strong className="text-[#f5efe6]">same day ({formatReadableDate(dropoffDate)})</strong>.</>}
                       </p>
-                    </div>
-                  </motion.div>
-                )}
-
-                {/* CASE 3: VOLUNTEER TEAM FORM */}
-                {deliveryMethod === "volunteer" && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="space-y-3.5"
-                  >
-                    <div className="flex items-center justify-between border-b border-[#36271e] pb-2">
-                      <div className="flex items-center gap-1.5 text-xs font-serif font-bold text-[#f5efe6]">
-                        <User className="w-3.5 h-3.5 text-[#d4b292]" />
-                        <span>Volunteer Handover Appointment</span>
-                      </div>
-                      <span className="text-[10px] text-[#d4b292] bg-[#3a2c22] px-1.5 py-0.5 rounded font-mono">
-                        Hand-to-Hand
-                      </span>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[11px] font-medium text-[#c8b7a6]">
-                        Volunteer Meeting Date
-                      </label>
-                      <input
-                        type="date"
-                        value={volunteerDate}
-                        min={getFutureDateStr(0)}
-                        onChange={(e) => setVolunteerDate(e.target.value)}
-                        className="w-full bg-[#120d09] border border-[#443328] rounded-xl px-3 py-2 text-xs text-[#f5efe6] focus:border-[#d4b292] focus:outline-none"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[11px] font-medium text-[#c8b7a6]">
-                        Preferred Meeting Time Window
-                      </label>
-                      <select
-                        value={volunteerTimeSlot}
-                        onChange={(e) => setVolunteerTimeSlot(e.target.value)}
-                        className="w-full bg-[#120d09] border border-[#443328] rounded-xl px-3 py-2 text-xs text-[#f5efe6] focus:border-[#d4b292] focus:outline-none"
-                      >
-                        <option value="10:00 - 13:00 (Morning Session)">10:00 - 13:00 (Morning Session)</option>
-                        <option value="14:00 - 17:00 (Afternoon Slot)">14:00 - 17:00 (Afternoon Slot)</option>
-                        <option value="18:00 - 20:00 (Evening Post-Work)">18:00 - 20:00 (Evening Post-Work)</option>
-                      </select>
-                    </div>
-
-                    {/* ESTIMATE DELIVERED DATE BANNER */}
-                    <div className="bg-[#241a13] border border-[#4a392c] rounded-xl p-3 flex items-start gap-2.5">
-                      <CalendarCheck className="w-4 h-4 text-[#d4b292] shrink-0 mt-0.5" />
-                      <div className="text-[11px] space-y-0.5">
-                        <div className="text-[#a8896c] font-medium">Estimated Delivery to Shelter:</div>
-                        <div className="font-bold text-[#f5efe6] text-xs">
-                          {formatReadableDate(volunteerDate, 1)} (Next Day Distribution)
-                        </div>
-                      </div>
                     </div>
                   </motion.div>
                 )}
@@ -1611,68 +1767,6 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
       </AnimatePresence>
 
       {/* ==================================================== */}
-      {/* MODAL: Bundle Relief Item Selector */}
-      {/* ==================================================== */}
-      <AnimatePresence>
-        {isComboModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-[#291f18] rounded-2xl p-5 sm:p-6 max-w-md w-full shadow-2xl space-y-4 text-left border border-[#443328]"
-            >
-              <div className="flex items-center justify-between border-b border-[#36271e] pb-3">
-                <h4 className="font-serif font-bold text-sm text-[#f5efe6] flex items-center gap-2">
-                  <Gift className="w-4 h-4 text-[#d4b292]" />
-                  Add Relief Essentials Bundle ({comboTargetStore})
-                </h4>
-                <button
-                  onClick={() => setIsComboModalOpen(false)}
-                  className="text-[#a8896c] hover:text-[#f5efe6] cursor-pointer"
-                >
-                  ✕
-                </button>
-              </div>
-
-              <p className="text-xs text-[#c8b7a6] leading-relaxed">
-                Adding matching essential supplies will combine with your care box for free single-dispatch distribution to community shelters.
-              </p>
-
-              <div className="p-3.5 bg-[#1c140f] rounded-xl border border-[#3e2e23] flex items-center gap-3">
-                <img
-                  src="https://images.unsplash.com/photo-1584100936595-c0654b55a2e2?auto=format&fit=crop&w=150&q=80"
-                  alt="Relief Essentials"
-                  className="w-12 h-12 rounded-lg object-cover border border-[#4a392e]"
-                />
-                <div className="flex-1 min-w-0">
-                  <h5 className="text-xs font-serif font-bold text-[#f5efe6] truncate">Thermal Fleece Quilt & Towel Set</h5>
-                  <div className="text-xs text-[#a8896c]">1 Pack • Essential Relief</div>
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-2.5 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setIsComboModalOpen(false)}
-                  className="px-3.5 py-2 text-xs text-[#c8b7a6] hover:text-white bg-[#201812] hover:bg-[#2c2018] rounded-xl cursor-pointer font-medium border border-[#3e2e23]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleAddComboItem(comboTargetStore)}
-                  className="px-4 py-2 text-xs font-serif font-bold bg-[#4a3a2d] text-[#f5efe6] rounded-xl hover:bg-[#5e4a3b] cursor-pointer shadow-md border border-[#6b5443]"
-                >
-                  + Add to Donate Box
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* ==================================================== */}
       {/* MODAL: Details of the Item Requested */}
       {/* ==================================================== */}
       <RequestDetailModal
@@ -1680,15 +1774,44 @@ export default function AppPreparingDonateBox({ navigateToView }: AppPreparingDo
         isOpen={Boolean(selectedDetailRequest)}
         onClose={() => setSelectedDetailRequest(null)}
         onAddToDonateBox={(req) => {
-          const existing = cartItems.find((i) => i.requestId === req.id || i.title === req.title);
+          const existing = cartItems.find((i) => i.requestId === req.id);
           if (existing) {
             handleUpdateQuantity(existing.id, Math.min(existing.maxNeeded, existing.quantity + 1));
           }
         }}
-        onSupportNow={(req) => {
-          const existing = cartItems.find((i) => i.requestId === req.id || i.title === req.title);
+        onRemoveFromDonateBox={(req) => {
+          const existing = cartItems.find((i) => i.requestId === req.id);
           if (existing) {
-            const updated = cartItems.map((i) => (i.id === existing.id ? { ...i, checked: true } : i));
+            handleRemoveItem(existing.id);
+          }
+          setSelectedDetailRequest(null);
+        }}
+        onSupportNow={(req) => {
+          const existing = cartItems.find((i) => i.requestId === req.id);
+          if (existing) {
+            // Tick only the selected item (uncheck all others)
+            const updated = cartItems.map((i) => ({
+              ...i,
+              checked: i.id === existing.id
+            }));
+            saveCart(updated);
+          } else {
+            const newItem: DonateBoxCartItem = {
+              id: `cart_${Date.now()}`,
+              requestId: req.id,
+              title: req.title,
+              category: req.category,
+              imageUrl: req.imageUrl,
+              location: req.location,
+              unit: req.unit,
+              quantity: 1,
+              maxNeeded: Math.max(1, req.quantity - (req.pledgedQuantity || 0)),
+              organizerName: req.organizerName || "Hope Community Aid (NGO)",
+              brand: req.brand || "Standard",
+              color: req.color || "Any",
+              checked: true
+            };
+            const updated = [newItem, ...cartItems.map((i) => ({ ...i, checked: false }))];
             saveCart(updated);
           }
           setSelectedDetailRequest(null);

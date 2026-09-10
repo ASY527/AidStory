@@ -34,12 +34,26 @@ import {
   Maximize2,
   Eye,
   Star,
-  PlusCircle
+  PlusCircle,
+  Building,
+  FileText,
+  MessageSquare
 } from "lucide-react";
-import { RecipientRequest, AidCampaign, RequestCategory } from "../types";
+import { RecipientRequest, AidCampaign, RequestCategory, RequestUpdate, formatCapitalizedTitle, formatRequestPostedDate } from "../types";
+import {
+  saveRequestToCloud,
+  deleteRequestFromCloud,
+  updateRequestInCloud,
+  subscribeToAllRequests
+} from "../lib/cloudService";
+import { SEED_COMMUNITY_REQUESTS } from "../data/seedDatabase";
+import {
+  getAllMergedCommunityRequests,
+  broadcastCommunityRequestsUpdate
+} from "../data/allRequestsCatalog";
 
 interface AppYourRequestProps {
-  navigateToView: (view: "home" | "comments" | "explore" | "main_menu" | "your_request" | "needs") => void;
+  navigateToView: (view: "home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box" | "delivery_status") => void;
 }
 
 const STANDARD_CATEGORIES: RequestCategory[] = [
@@ -50,17 +64,60 @@ const STANDARD_CATEGORIES: RequestCategory[] = [
   "Elderly / OKU",
   "Education",
   "Clothing",
+  "Household",
   "Others"
+];
+
+const BRAND_PRESETS = [
+  "Any brand",
+  "Pedigree",
+  "Enfamil",
+  "Nestlé / Milo",
+  "Drypers",
+  "Top Detergent",
+  "Anlene",
+  "Royal Canin",
+  "Dutch Lady",
+  "Huggies"
+];
+
+const COLOR_PRESETS = [
+  "Any",
+  "Blue",
+  "Black",
+  "White",
+  "Red",
+  "Multi-colour",
+  "Grey",
+  "Yellow",
+  "Green"
+];
+
+const UNIT_OPTIONS = [
+  "bags",
+  "tins / cans",
+  "packs",
+  "boxes",
+  "units / items",
+  "sets",
+  "cartons",
+  "bottles",
+  "pairs",
+  "kg",
+  "pieces"
 ];
 
 const CATEGORY_COLORS: Record<string, { bg: string; text: string; border: string }> = {
   Emergency: { bg: "bg-rose-950/40", text: "text-rose-300", border: "border-rose-500/40" },
   Food: { bg: "bg-amber-950/40", text: "text-amber-300", border: "border-amber-500/40" },
+  Foods: { bg: "bg-amber-950/40", text: "text-amber-300", border: "border-amber-500/40" },
   Animal: { bg: "bg-emerald-950/40", text: "text-emerald-300", border: "border-emerald-500/40" },
+  Animals: { bg: "bg-emerald-950/40", text: "text-emerald-300", border: "border-emerald-500/40" },
   Medical: { bg: "bg-cyan-950/40", text: "text-cyan-300", border: "border-cyan-500/40" },
   "Elderly / OKU": { bg: "bg-purple-950/40", text: "text-purple-300", border: "border-purple-500/40" },
   Education: { bg: "bg-indigo-950/40", text: "text-indigo-300", border: "border-indigo-500/40" },
   Clothing: { bg: "bg-teal-950/40", text: "text-teal-300", border: "border-teal-500/40" },
+  Household: { bg: "bg-sky-950/40", text: "text-sky-300", border: "border-sky-500/40" },
   Others: { bg: "bg-stone-800/60", text: "text-stone-300", border: "border-stone-600/40" }
 };
 
@@ -234,6 +291,106 @@ const INITIAL_CAMPAIGNS: AidCampaign[] = [
   }
 ];
 
+// Helper to generate user storage keys
+const getUserStorageKey = (currentUser: any, prefix: string) => {
+  if (!currentUser) return `${prefix}_guest`;
+  const id = (currentUser.email || currentUser.username || "user").toLowerCase().replace(/[^a-z0-9_]/g, "_");
+  return `${prefix}_${id}`;
+};
+
+// Known other charity identifiers that should NEVER leak into a user's private request dashboard
+const isKnownOtherCharity = (orgName?: string) => {
+  if (!orgName) return false;
+  const o = orgName.toLowerCase();
+  const known = [
+    "johor flood relief",
+    "sarawak rural safe water",
+    "sibu animal hope",
+    "bangsar infant care",
+    "kids hope workshop",
+    "sibu community kindergarten",
+    "perak community relief center",
+    "perak community care network",
+    "ipoh family support",
+    "petaling community care",
+    "klang valley relief",
+    "subang elderly care",
+    "selangor food aid",
+    "selangor disaster relief",
+    "kelantan community aid",
+    "terengganu flood relief",
+    "johor disaster care",
+    "kedah rural assistance",
+    "pahang community foundation",
+    "perak care welfare",
+    "penang oku support"
+  ];
+  return known.some((k) => o.includes(k));
+};
+
+// Check if a request belongs to the currently logged in user
+const isRequestBelongingToUser = (req: RecipientRequest, currentUser: any): boolean => {
+  if (!req || !currentUser) return false;
+  const userEmail = (currentUser.email || "").toLowerCase().trim();
+  const username = (currentUser.username || "").toLowerCase().trim();
+  const charityName = (currentUser.charityName || currentUser.organizationName || "").toLowerCase().trim();
+  const isAdmin = userEmail === "aidstoryadmin@gmail.com" || username === "admin" || currentUser.role === "admin" || currentUser.isAdmin === true;
+
+  // 1. Explicit user email match
+  if (req.authorEmail && userEmail && req.authorEmail.toLowerCase().trim() === userEmail) return true;
+  if (req.createdByUserEmail && userEmail && req.createdByUserEmail.toLowerCase().trim() === userEmail) return true;
+  if ((req as any).recipientEmail && userEmail && (req as any).recipientEmail.toLowerCase().trim() === userEmail) return true;
+  if ((req as any).ownerEmail && userEmail && (req as any).ownerEmail.toLowerCase().trim() === userEmail) return true;
+
+  // 2. Explicit username match
+  if (req.createdByUsername && username && req.createdByUsername.toLowerCase().trim() === username) return true;
+  if (req.authorName && username && req.authorName.toLowerCase().trim() === username) return true;
+  if ((req as any).author && username && (req as any).author.toLowerCase().trim() === username) return true;
+  if ((req as any).requestedBy && username && (req as any).requestedBy.toLowerCase().trim() === username) return true;
+
+  // 3. Charity / Organization name match
+  if (charityName) {
+    const org = (req.organizerName || (req as any).organization || "").toLowerCase().trim();
+    if (org && (org === charityName || org.includes(charityName) || charityName.includes(org))) return true;
+  }
+
+  // 4. Owner / Recipient ID match
+  if (currentUser.id) {
+    if ((req as any).ownerId && (req as any).ownerId === currentUser.id) return true;
+    if ((req as any).recipientId && (req as any).recipientId === currentUser.id) return true;
+    if ((req as any).userId && (req as any).userId === currentUser.id) return true;
+  }
+
+  // 5. Admin user exception
+  if (isAdmin && req.id && (req.id.startsWith("req_") || req.id.startsWith("need_"))) {
+    return true;
+  }
+
+  return false;
+};
+
+// Check if a campaign belongs to the currently logged in user
+const isCampaignBelongingToUser = (camp: AidCampaign, currentUser: any): boolean => {
+  if (!currentUser) return false;
+  const userEmail = (currentUser.email || "").toLowerCase().trim();
+  const username = (currentUser.username || "").toLowerCase().trim();
+  const charityName = (currentUser.charityName || currentUser.organizationName || "").toLowerCase().trim();
+  const isAdmin = userEmail === "aidstoryadmin@gmail.com" || username === "admin" || currentUser.role === "admin" || currentUser.isAdmin === true;
+
+  if (camp.authorEmail && userEmail && camp.authorEmail.toLowerCase().trim() === userEmail) return true;
+  if (camp.createdByUserEmail && userEmail && camp.createdByUserEmail.toLowerCase().trim() === userEmail) return true;
+  if (camp.createdByUsername && username && camp.createdByUsername.toLowerCase().trim() === username) return true;
+  if (camp.authorName && username && camp.authorName.toLowerCase().trim() === username) return true;
+
+  if (charityName && (camp.authorName || "").toLowerCase().includes(charityName)) return true;
+
+  if (isAdmin && (camp.id === "camp_flood_2026" || camp.id === "camp_food_pantry")) {
+    return true;
+  }
+
+  return false;
+};
+
 export default function AppYourRequest({ navigateToView }: AppYourRequestProps) {
   const [activeTab, setActiveTab] = useState<"current" | "create" | "campaigns" | "history">("current");
   const [categoryFilter, setCategoryFilter] = useState<string>("All");
@@ -255,63 +412,195 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
     return null;
   });
 
-  // Requests state
+  // Requests state filtered strictly for current user
   const [requests, setRequests] = useState<RecipientRequest[]>(() => {
     if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("aidstory_recipient_requests");
-      if (saved) {
+      const currentUser = (() => {
         try {
-          return JSON.parse(saved);
-        } catch (e) {
-          return INITIAL_REQUESTS;
+          const s = localStorage.getItem("aidstory_current_user");
+          return s ? JSON.parse(s) : null;
+        } catch {
+          return null;
         }
+      })();
+
+      if (!currentUser) return [];
+
+      const userEmail = (currentUser.email || "").toLowerCase().trim();
+      const username = (currentUser.username || "").toLowerCase().trim();
+      const isAdmin = userEmail === "aidstoryadmin@gmail.com" || username === "admin" || currentUser.role === "admin";
+
+      if (isAdmin) {
+        return INITIAL_REQUESTS.map((r) => ({
+          ...r,
+          authorEmail: userEmail,
+          createdByUserEmail: userEmail,
+          createdByUsername: username
+        }));
       }
+
+      // 1. Gather all seed requests matching this recipient
+      const seededForUser = (SEED_COMMUNITY_REQUESTS || []).filter((r) => isRequestBelongingToUser(r, currentUser));
+
+      // 2. Gather user's stored custom requests
+      let savedUserReqs: RecipientRequest[] = [];
+      const userKey = getUserStorageKey(currentUser, "aidstory_user_requests");
+      const userSaved = localStorage.getItem(userKey);
+      if (userSaved) {
+        try {
+          const parsed = JSON.parse(userSaved);
+          if (Array.isArray(parsed)) {
+            savedUserReqs = parsed.filter((r) => isRequestBelongingToUser(r, currentUser));
+          }
+        } catch {}
+      }
+
+      // Check global needs list for any additional requests belonging to this user
+      const allNeedsSaved = localStorage.getItem("aidstory_all_needs");
+      if (allNeedsSaved) {
+        try {
+          const parsed = JSON.parse(allNeedsSaved);
+          if (Array.isArray(parsed)) {
+            const matched = parsed.filter((r) => isRequestBelongingToUser(r, currentUser));
+            matched.forEach((m) => {
+              if (!savedUserReqs.some((r) => r.id === m.id)) {
+                savedUserReqs.push(m);
+              }
+            });
+          }
+        } catch {}
+      }
+
+      // Merge saved and seed requests by ID
+      const reqMap = new Map<string, RecipientRequest>();
+      seededForUser.forEach((r) => reqMap.set(r.id, r));
+      savedUserReqs.forEach((r) => reqMap.set(r.id, r));
+
+      return Array.from(reqMap.values());
     }
-    return INITIAL_REQUESTS;
+    return [];
   });
 
-  // Campaigns state
+  // Campaigns state filtered strictly for current user
   const [campaigns, setCampaigns] = useState<AidCampaign[]>(() => {
     if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("aidstory_recipient_campaigns");
-      if (saved) {
+      const currentUser = (() => {
         try {
-          return JSON.parse(saved);
-        } catch (e) {
-          return INITIAL_CAMPAIGNS;
+          const s = localStorage.getItem("aidstory_current_user");
+          return s ? JSON.parse(s) : null;
+        } catch {
+          return null;
         }
+      })();
+
+      if (!currentUser) return [];
+
+      const userCampKey = getUserStorageKey(currentUser, "aidstory_user_campaigns");
+      const userSaved = localStorage.getItem(userCampKey);
+      if (userSaved) {
+        try {
+          const parsed = JSON.parse(userSaved);
+          if (Array.isArray(parsed)) {
+            return parsed.filter((c) => isCampaignBelongingToUser(c, currentUser));
+          }
+        } catch {}
       }
+
+      const legacySaved = localStorage.getItem("aidstory_recipient_campaigns");
+      if (legacySaved) {
+        try {
+          const parsed = JSON.parse(legacySaved);
+          if (Array.isArray(parsed)) {
+            const userOnly = parsed.filter((c) => isCampaignBelongingToUser(c, currentUser));
+            if (userOnly.length > 0) return userOnly;
+          }
+        } catch {}
+      }
+
+      const userEmail = (currentUser.email || "").toLowerCase().trim();
+      const username = (currentUser.username || "").toLowerCase().trim();
+      const isAdmin = userEmail === "aidstoryadmin@gmail.com" || username === "admin" || currentUser.role === "admin";
+      if (isAdmin) {
+        return INITIAL_CAMPAIGNS.map((c) => ({
+          ...c,
+          authorEmail: userEmail,
+          createdByUserEmail: userEmail,
+          createdByUsername: username
+        }));
+      }
+
+      return [];
     }
-    return INITIAL_CAMPAIGNS;
+    return [];
   });
 
-  // Save changes to localStorage
+  // Save changes to user-specific localStorage and sync into global catalog
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      localStorage.setItem("aidstory_recipient_requests", JSON.stringify(requests));
+    if (typeof window !== "undefined" && user) {
+      const userKey = getUserStorageKey(user, "aidstory_user_requests");
+      localStorage.setItem(userKey, JSON.stringify(requests));
+
+      // Also sync user requests into the global browse needs catalog (aidstory_all_needs)
+      try {
+        const allNeedsJSON = localStorage.getItem("aidstory_all_needs");
+        let allNeeds: RecipientRequest[] = [];
+        if (allNeedsJSON) {
+          allNeeds = JSON.parse(allNeedsJSON);
+        } else {
+          allNeeds = getAllMergedCommunityRequests();
+        }
+        if (Array.isArray(allNeeds)) {
+          // Remove previous versions of this user's requests from allNeeds
+          const otherNeeds = allNeeds.filter((r) => !isRequestBelongingToUser(r, user));
+          // Re-insert this user's current requests
+          const updatedAll = [...requests, ...otherNeeds];
+          localStorage.setItem("aidstory_all_needs", JSON.stringify(updatedAll));
+          broadcastCommunityRequestsUpdate(updatedAll);
+        }
+      } catch {}
     }
-  }, [requests]);
+  }, [requests, user]);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      localStorage.setItem("aidstory_recipient_campaigns", JSON.stringify(campaigns));
+    if (typeof window !== "undefined" && user) {
+      const userCampKey = getUserStorageKey(user, "aidstory_user_campaigns");
+      localStorage.setItem(userCampKey, JSON.stringify(campaigns));
     }
-  }, [campaigns]);
+  }, [campaigns, user]);
 
-  // Form State for Add New Request (Multi-Image Support)
+  // Real-time Cloud subscription to sync user requests across devices
+  useEffect(() => {
+    if (!user) return;
+    const unsub = subscribeToAllRequests((cloudList) => {
+      if (cloudList && cloudList.length > 0) {
+        const userItems = cloudList.filter((r) => isRequestBelongingToUser(r, user));
+        if (userItems.length > 0) {
+          setRequests(userItems);
+        }
+      }
+    });
+    return () => unsub();
+  }, [user]);
+
+  // Form State for Add New Request (Multi-Image & Full Specification Support)
   const [reqTitle, setReqTitle] = useState("");
   const [reqCategories, setReqCategories] = useState<string[]>(["Food"]);
   const [reqCustomCategory, setReqCustomCategory] = useState<string>("");
+  const [reqBrand, setReqBrand] = useState("Any brand");
+  const [reqColor, setReqColor] = useState("Any");
   const [reqDesc, setReqDesc] = useState("");
   const [reqLocation, setReqLocation] = useState("");
+  const [reqOrganizerName, setReqOrganizerName] = useState("");
+  const [reqInitialUpdateNote, setReqInitialUpdateNote] = useState("");
   const [reqQuantity, setReqQuantity] = useState(10);
   const [reqUnit, setReqUnit] = useState("packs");
   const [reqImages, setReqImages] = useState<string[]>([]);
   const [primaryImageIndex, setPrimaryImageIndex] = useState<number>(0);
   const [reqPostedDateTime, setReqPostedDateTime] = useState("");
-  const [reqUrgency, setReqUrgency] = useState<"standard" | "medium" | "high">("medium");
+  const [reqUrgency, setReqUrgency] = useState<"standard" | "important" | "emergency">("important");
   const [reqSelectedCampaignId, setReqSelectedCampaignId] = useState<string>("");
   const [isDragOver, setIsDragOver] = useState(false);
+  const [previewCarouselIdx, setPreviewCarouselIdx] = useState(0);
 
   // Form State for Create / Edit Campaign Modal
   const [isNewCampaignModalOpen, setIsNewCampaignModalOpen] = useState(false);
@@ -327,13 +616,20 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
   const [assignModalReq, setAssignModalReq] = useState<RecipientRequest | null>(null);
   const [selectedTargetCampaignId, setSelectedTargetCampaignId] = useState<string>("");
 
-  // Edit Request Modal State (Multi-Image Support)
+  // Edit Request Modal State (Multi-Image, Horizontal Layout & Donor Updates Support)
   const [editingRequest, setEditingRequest] = useState<RecipientRequest | null>(null);
   const [editReqCategories, setEditReqCategories] = useState<string[]>(["Food"]);
   const [editReqCustomCategory, setEditReqCustomCategory] = useState<string>("");
+  const [editReqBrand, setEditReqBrand] = useState("Any brand");
+  const [editReqColor, setEditReqColor] = useState("Any");
+  const [editReqOrganizerName, setEditReqOrganizerName] = useState("");
+  const [editReqUrgency, setEditReqUrgency] = useState<RecipientRequest["urgencyLevel"]>("important");
   const [editReqImages, setEditReqImages] = useState<string[]>([]);
   const [editPrimaryImageIndex, setEditPrimaryImageIndex] = useState<number>(0);
   const [isEditDragOver, setIsEditDragOver] = useState(false);
+  const [editReqUpdates, setEditReqUpdates] = useState<RequestUpdate[]>([]);
+  const [newUpdateText, setNewUpdateText] = useState<string>("");
+  const [newUpdateDate, setNewUpdateDate] = useState<string>("");
 
   // Card Image Active Index for Interactive Browsing
   const [activeCardImageIdx, setActiveCardImageIdx] = useState<Record<string, number>>({});
@@ -478,7 +774,8 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
   const handleSubmitNewRequest = (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!reqTitle.trim()) {
+    const cleanTitle = formatCapitalizedTitle(reqTitle.trim());
+    if (!cleanTitle) {
       showToast("Please enter the name of the requested item.");
       return;
     }
@@ -525,10 +822,12 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
 
     const newRequest: RecipientRequest = {
       id: `req_${Date.now()}`,
-      title: reqTitle.trim(),
+      title: cleanTitle,
       category: primaryCategory,
       categories: finalCategories,
       customCategory: customTags.join(", ") || undefined,
+      brand: reqBrand.trim() || "Any brand",
+      color: reqColor.trim() || "Any",
       description: reqDesc.trim() || "Essential goods needed for community relief support.",
       imageUrl: finalImageList[0],
       images: finalImageList,
@@ -542,8 +841,21 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
       campaignId: reqSelectedCampaignId || undefined,
       campaignTitle: targetCampaign?.title,
       authorName: user?.username || "Verified Recipient",
+      authorEmail: user?.email || undefined,
+      createdByUserEmail: user?.email || undefined,
+      createdByUsername: user?.username || undefined,
       authorType: user?.role || "NGO Representative",
-      urgencyLevel: reqUrgency
+      organizerName: reqOrganizerName.trim() || user?.charityName || user?.username || "Hope Community Aid (NGO)",
+      organizerAvatar: user?.avatarUrl || user?.profilePhoto || undefined,
+      urgencyLevel: reqUrgency,
+      updates: reqInitialUpdateNote.trim() ? [
+        {
+          id: Date.now().toString(),
+          date: "JUST NOW",
+          text: reqInitialUpdateNote.trim(),
+          author: user?.username || "Organizer"
+        }
+      ] : undefined
     };
 
     // If campaign selected, add request ID to that campaign
@@ -559,9 +871,25 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
 
     setRequests((prev) => [newRequest, ...prev]);
 
+    // Save directly to Cloud Firestore for cross-device persistence
+    saveRequestToCloud(newRequest).catch((err) => console.warn("Could not save request to cloud:", err));
+
+    // Also sync to global localStorage if available
+    try {
+      const existingAllJSON = localStorage.getItem("aidstory_all_needs") || localStorage.getItem("aidstory_recipient_requests");
+      if (existingAllJSON) {
+        const existingAll: RecipientRequest[] = JSON.parse(existingAllJSON);
+        const filteredOld = existingAll.filter((r) => r.id !== newRequest.id);
+        localStorage.setItem("aidstory_all_needs", JSON.stringify([newRequest, ...filteredOld]));
+      }
+    } catch (err) {}
+
     // Reset Form
     setReqTitle("");
+    setReqBrand("Any brand");
+    setReqColor("Any");
     setReqDesc("");
+    setReqInitialUpdateNote("");
     setReqImages([]);
     setPrimaryImageIndex(0);
     setReqQuantity(10);
@@ -577,6 +905,7 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
   // Mark Request as Fulfilled
   const handleMarkFulfilled = (requestId: string) => {
     const nowStr = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+    const targetReq = requests.find((r) => r.id === requestId);
     setRequests((prev) =>
       prev.map((r) =>
         r.id === requestId
@@ -584,12 +913,20 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
           : r
       )
     );
+    if (targetReq) {
+      updateRequestInCloud(requestId, {
+        status: "fulfilled",
+        fulfilledDate: nowStr,
+        pledgedQuantity: targetReq.quantity
+      }).catch((err) => console.warn("Cloud fulfill update failed:", err));
+    }
     showToast("Request marked as fulfilled & moved to Past History!");
   };
 
   // Delete Request
   const handleDeleteRequest = (requestId: string) => {
     setRequests((prev) => prev.filter((r) => r.id !== requestId));
+    deleteRequestFromCloud(requestId).catch((err) => console.warn("Cloud delete failed:", err));
     // Also remove from any campaigns
     setCampaigns((prev) =>
       prev.map((c) => ({
@@ -612,6 +949,7 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
       postedTimestamp: Date.now()
     };
     setRequests((prev) => [duplicated, ...prev]);
+    saveRequestToCloud(duplicated).catch((err) => console.warn("Cloud reopen request save failed:", err));
     showToast(`"${req.title}" re-posted to Active Requests!`);
     setActiveTab("current");
   };
@@ -670,7 +1008,8 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
   // Save Campaign (Create or Update)
   const handleSaveCampaign = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!campTitle.trim()) {
+    const cleanCampTitle = formatCapitalizedTitle(campTitle.trim());
+    if (!cleanCampTitle) {
       showToast("Please enter a campaign title.");
       return;
     }
@@ -678,7 +1017,7 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
     if (editingCampaignId) {
       // UPDATE EXISTING CAMPAIGN
       const targetCampId = editingCampaignId;
-      const targetTitle = campTitle.trim();
+      const targetTitle = cleanCampTitle;
 
       setCampaigns((prev) =>
         prev.map((c) => {
@@ -722,14 +1061,18 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
       const newCampaignId = `camp_${Date.now()}`;
       const newCamp: AidCampaign = {
         id: newCampaignId,
-        title: campTitle.trim(),
+        title: cleanCampTitle,
         description: campDesc.trim() || "Community collective aid initiative.",
         category: campCategory,
         targetDate: campTargetDate || "Ongoing",
         createdAt: new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }),
         status: "active",
         requestIds: campSelectedReqIds,
-        bannerEmoji: campEmoji || "📦"
+        bannerEmoji: campEmoji || "📦",
+        authorName: user?.username || "Verified Recipient",
+        authorEmail: user?.email || undefined,
+        createdByUserEmail: user?.email || undefined,
+        createdByUsername: user?.username || undefined
       };
 
       // Update the selected requests with this campaign's ID and title
@@ -797,21 +1140,75 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
     setAssignModalReq(null);
   };
 
+  // Date Formatter helper for Donor Updates
+  const getTodayFormattedDate = () => {
+    const d = new Date();
+    return `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`;
+  };
+
+  const UPDATE_PRESET_TEMPLATES = [
+    "Currently, we receive some calls and pledges for these essentials. Thanks for all donor support!",
+    "Aid campaign officially opened for emergency distribution to local community centers.",
+    "First batch of donated care packs received and currently being sorted by our volunteer team.",
+    "Urgent call: Still short of 15 packs before this weekend's delivery to flooded areas.",
+    "Distribution underway! Supplies are being handed over directly to affected families."
+  ];
+
+  const handleAddNewUpdate = () => {
+    const trimmed = newUpdateText.trim();
+    if (!trimmed) {
+      showToast("Please enter an update message for donors.");
+      return;
+    }
+    const dateStr = newUpdateDate.trim() || getTodayFormattedDate();
+    const newUp: RequestUpdate = {
+      id: `up_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      date: dateStr,
+      text: trimmed,
+      author: user?.charityName || user?.username || "Organizer"
+    };
+    setEditReqUpdates((prev) => [newUp, ...prev]);
+    setNewUpdateText("");
+    showToast("Update added to timeline! Remember to click Save Changes to publish.");
+  };
+
+  const handleRemoveEditUpdate = (idToRemove: string) => {
+    setEditReqUpdates((prev) => prev.filter((u) => u.id !== idToRemove));
+    showToast("Update removed from draft.");
+  };
+
+  const handleApplyUpdatePreset = (presetText: string) => {
+    setNewUpdateText(presetText);
+  };
+
   // Open Edit Request Modal
   const handleOpenEditRequest = (req: RecipientRequest) => {
     setEditingRequest(req);
     const existingCats = getRequestCategories(req);
     setEditReqCategories(existingCats);
     setEditReqCustomCategory(req.customCategory || "");
+    setEditReqBrand(req.brand || "Any brand");
+    setEditReqColor(req.color || "Any");
+    setEditReqOrganizerName(req.organizerName || req.authorName || user?.username || "Hope Community Aid (NGO)");
+    setEditReqUrgency(req.urgencyLevel || "important");
     const existingImages = getRequestImages(req);
     setEditReqImages(existingImages);
     setEditPrimaryImageIndex(0);
+    setEditReqUpdates(req.updates && req.updates.length > 0 ? [...req.updates] : []);
+    setNewUpdateText("");
+    setNewUpdateDate(getTodayFormattedDate());
   };
 
   // Save Edited Request
   const handleSaveEditRequest = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingRequest) return;
+
+    const cleanEditTitle = formatCapitalizedTitle(editingRequest.title.trim());
+    if (!cleanEditTitle) {
+      showToast("Please enter a valid item title.");
+      return;
+    }
 
     const standardSelected = editReqCategories.filter((c) => c !== "Others" && STANDARD_CATEGORIES.includes(c as RequestCategory));
     const customTags = editReqCustomCategory
@@ -851,23 +1248,45 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
 
     const updated: RecipientRequest = {
       ...editingRequest,
+      title: cleanEditTitle,
       category: primaryCategory,
       categories: finalCategories,
       customCategory: customTags.join(", ") || undefined,
+      brand: editReqBrand.trim() || "Any brand",
+      color: editReqColor.trim() || "Any",
+      organizerName: editReqOrganizerName.trim() || editingRequest.organizerName || user?.username || "Verified Partner",
+      organizerAvatar: user?.avatarUrl || user?.profilePhoto || editingRequest.organizerAvatar || undefined,
+      urgencyLevel: editReqUrgency,
       imageUrl: finalImageList[0],
-      images: finalImageList
+      images: finalImageList,
+      updates: editReqUpdates
     };
 
     setRequests((prev) =>
       prev.map((r) => (r.id === updated.id ? updated : r))
     );
+
+    // Save to Cloud Firestore
+    saveRequestToCloud(updated).catch((err) => console.warn("Cloud edit save failed:", err));
+
+    // Sync to global localStorage
+    try {
+      const existingAllJSON = localStorage.getItem("aidstory_all_needs") || localStorage.getItem("aidstory_recipient_requests");
+      if (existingAllJSON) {
+        const existingAll: RecipientRequest[] = JSON.parse(existingAllJSON);
+        const nextAll = existingAll.map((r) => (r.id === updated.id ? updated : r));
+        localStorage.setItem("aidstory_all_needs", JSON.stringify(nextAll));
+      }
+    } catch (err) {}
+
     setEditingRequest(null);
-    showToast(`Request "${updated.title}" updated with ${finalImageList.length} photo(s)!`);
+    showToast(`Request "${updated.title}" updated successfully!`);
   };
 
-  // Active requests filtering
-  const activeRequests = requests.filter((r) => r.status === "active");
-  const pastRequests = requests.filter((r) => r.status === "fulfilled");
+  // Active requests filtering strictly for the current user
+  const activeRequests = requests.filter((r) => r.status === "active" && isRequestBelongingToUser(r, user));
+  const pastRequests = requests.filter((r) => r.status === "fulfilled" && isRequestBelongingToUser(r, user));
+  const userCampaigns = campaigns.filter((c) => isCampaignBelongingToUser(c, user));
 
   const filteredActiveRequests = activeRequests.filter((r) => {
     const rCategories = getRequestCategories(r);
@@ -886,6 +1305,83 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
       rCategories.some((c) => c.toLowerCase().includes(searchQuery.toLowerCase()));
     return matchesCategory && matchesSearch;
   });
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-[#1c1814] text-[#f4efe5] selection:bg-[#82afa6] selection:text-[#1c1814] font-sans flex flex-col justify-between pb-8">
+        <header className="sticky top-0 z-40 bg-[#25201a]/95 backdrop-blur-md border-b border-white/10 shadow-lg px-4 sm:px-8 py-4 flex items-center justify-between">
+          <button
+            onClick={() => navigateToView("main_menu")}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/5 hover:bg-white/15 text-[#f4efe5] text-xs font-mono transition-all border border-white/10 cursor-pointer"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>Main Menu</span>
+          </button>
+          <span className="font-serif italic font-medium text-lg text-brand-cream">
+            Post Request
+          </span>
+        </header>
+
+        <div className="flex-1 flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-[380px] bg-[#423a31] p-8 sm:p-9 rounded-[28px] border border-white/10 shadow-2xl text-center text-[#f4efe5]"
+          >
+            <div className="relative w-28 h-28 mx-auto mb-3 flex items-center justify-center">
+              <svg className="w-24 h-24" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path
+                  d="M 32 46 V 32 C 32 21 40 14 50 14 C 60 14 68 21 68 32 V 46"
+                  stroke="#e2e8f0"
+                  strokeWidth="8"
+                  strokeLinecap="round"
+                  fill="none"
+                />
+                <rect
+                  x="22"
+                  y="42"
+                  width="56"
+                  height="46"
+                  rx="12"
+                  fill="#ff8800"
+                  stroke="#cc6600"
+                  strokeWidth="3.5"
+                />
+                <circle cx="50" cy="61" r="5" fill="#423a31" />
+                <path d="M 48 64 L 46 75 H 54 L 52 64 Z" fill="#423a31" />
+              </svg>
+            </div>
+
+            <h3 className="text-2xl sm:text-3xl font-serif text-[#f4efe5] font-medium tracking-tight mb-2">
+              Locked.
+            </h3>
+            <p className="text-sm sm:text-base text-[#f4efe5]/85 font-sans mb-6 leading-relaxed">
+              login/sign up to unlock
+            </p>
+
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={() => navigateToView("home")}
+                className="w-full py-3 bg-[#ff5500] hover:bg-[#ff6600] text-white font-bold text-sm sm:text-base rounded-full shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
+              >
+                Login / Sign Up
+              </button>
+              <button
+                onClick={() => navigateToView("main_menu")}
+                className="w-full py-2.5 bg-white/10 hover:bg-white/15 text-[#f4efe5] text-xs font-mono rounded-full transition-all cursor-pointer"
+              >
+                Return to Main Menu
+              </button>
+            </div>
+          </motion.div>
+        </div>
+
+        <footer className="text-center py-4 text-xs font-mono text-white/40">
+          AidStory © 2026 • Recipient Community Requests
+        </footer>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#1c1814] text-[#f4efe5] selection:bg-[#82afa6] selection:text-[#1c1814] font-sans pb-16">
@@ -906,15 +1402,15 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
       </AnimatePresence>
 
       {/* HEADER BAR */}
-      <header className="sticky top-0 z-40 bg-[#25201a]/95 backdrop-blur-md border-b border-white/10 shadow-lg px-4 sm:px-8 py-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
+      <header className="sticky top-0 z-40 bg-[#25201a]/95 backdrop-blur-md border-b border-white/10 shadow-lg px-3 py-3 sm:px-8 sm:py-4">
+        <div className="max-w-7xl mx-auto flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
             <button
               onClick={() => navigateToView("main_menu")}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/5 hover:bg-white/15 text-[#f4efe5] text-xs font-mono transition-all border border-white/10 cursor-pointer"
             >
               <ArrowLeft className="w-4 h-4" />
-              <span>Main Menu</span>
+              <span className="hidden sm:inline">Main Menu</span>
             </button>
 
             <div className="h-5 w-[1px] bg-white/15 hidden sm:block" />
@@ -924,7 +1420,7 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
                 🧩
               </div>
               <div>
-                <h1 className="text-lg sm:text-xl font-serif font-bold text-[#f4efe5] tracking-tight leading-tight">
+                <h1 className="text-base sm:text-xl font-serif font-bold text-[#f4efe5] tracking-tight leading-tight">
                   Your Requests
                 </h1>
                 <p className="text-[11px] font-mono text-[#82afa6] hidden sm:block">
@@ -934,11 +1430,11 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5">
-            <div className="flex items-center gap-1.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 px-3 py-1 rounded-full text-xs font-mono font-bold shadow-sm">
+          <div className="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-start sm:gap-2.5">
+            <div className="flex min-w-0 items-center gap-1.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 px-3 py-1 rounded-full text-xs font-mono font-bold shadow-sm">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
               <span className="hidden md:inline">Verified Recipient:</span>
-              <span>{user?.username || "Authorized"}</span>
+              <span className="max-w-[160px] truncate sm:max-w-none">{user?.username || "Authorized"}</span>
             </div>
 
             <button
@@ -946,24 +1442,24 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
               className="flex items-center gap-1.5 bg-yellow-400 hover:bg-yellow-300 text-[#2c221a] px-4 py-1.5 rounded-full font-bold text-xs sm:text-sm shadow-md transition-all hover:scale-105 active:scale-95 cursor-pointer"
             >
               <Plus className="w-4 h-4 stroke-[3]" />
-              <span>Post Request</span>
+              <span className="hidden sm:inline">Post Request</span>
             </button>
           </div>
         </div>
       </header>
 
       {/* MAIN CONTAINER */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-8 pt-6 sm:pt-8">
+      <main className="max-w-7xl mx-auto px-4 pb-8 sm:px-8 sm:pt-8">
         
         {/* HERO / OVERVIEW BANNER */}
-        <div className="relative overflow-hidden bg-gradient-to-br from-[#332b23] via-[#29221b] to-[#1f1a15] rounded-3xl p-6 sm:p-8 border border-white/10 shadow-2xl mb-8">
+        <div className="relative overflow-hidden bg-gradient-to-br from-[#332b23] via-[#29221b] to-[#1f1a15] rounded-3xl p-4 sm:p-8 border border-white/10 shadow-2xl mb-6 sm:mb-8">
           <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
             <div className="max-w-2xl space-y-2">
               <div className="inline-flex items-center gap-1.5 bg-[#82afa6]/20 border border-[#82afa6]/40 text-[#82afa6] text-[11px] font-mono px-3 py-1 rounded-full font-bold">
                 <Sparkles className="w-3.5 h-3.5" />
                 <span>COMMUNITY RECIPIENT PORTAL</span>
               </div>
-              <h2 className="text-2xl sm:text-3xl font-serif text-[#f4efe5] font-semibold">
+              <h2 className="text-xl sm:text-3xl font-serif text-[#f4efe5] font-semibold">
                 Manage Supply Requests & Campaigns
               </h2>
               <p className="text-xs sm:text-sm text-[#f4efe5]/75 leading-relaxed">
@@ -972,22 +1468,22 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
             </div>
 
             {/* Quick Metrics Summary */}
-            <div className="grid grid-cols-3 gap-3 shrink-0">
-              <div className="bg-black/35 p-3.5 rounded-2xl border border-white/10 text-center min-w-[90px]">
+            <div className="grid grid-cols-3 gap-2 shrink-0">
+              <div className="min-w-0 bg-black/35 p-2.5 sm:p-3.5 rounded-2xl border border-white/10 text-center">
                 <span className="text-2xl sm:text-3xl font-serif font-bold text-yellow-400 block">
                   {activeRequests.length}
                 </span>
                 <span className="text-[10px] font-mono text-[#f4efe5]/60 uppercase">Active Needs</span>
               </div>
 
-              <div className="bg-black/35 p-3.5 rounded-2xl border border-white/10 text-center min-w-[90px]">
+              <div className="min-w-0 bg-black/35 p-2.5 sm:p-3.5 rounded-2xl border border-white/10 text-center">
                 <span className="text-2xl sm:text-3xl font-serif font-bold text-[#82afa6] block">
-                  {campaigns.length}
+                  {userCampaigns.length}
                 </span>
                 <span className="text-[10px] font-mono text-[#f4efe5]/60 uppercase">Campaigns</span>
               </div>
 
-              <div className="bg-black/35 p-3.5 rounded-2xl border border-white/10 text-center min-w-[90px]">
+              <div className="min-w-0 bg-black/35 p-2.5 sm:p-3.5 rounded-2xl border border-white/10 text-center">
                 <span className="text-2xl sm:text-3xl font-serif font-bold text-emerald-400 block">
                   {pastRequests.length}
                 </span>
@@ -998,19 +1494,19 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
         </div>
 
         {/* NAVIGATION TABS */}
-        <div className="flex flex-wrap items-center gap-2 sm:gap-3 border-b border-white/10 pb-4 mb-6">
+        <div className="flex flex-col items-stretch gap-2 border-b border-white/10 pb-4 mb-6 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
           <button
             onClick={() => setActiveTab("current")}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-full text-xs sm:text-sm font-sans font-bold transition-all cursor-pointer ${
+            className={`relative flex w-full items-center justify-center gap-2 px-4 py-2.5 rounded-full text-xs sm:text-sm font-sans font-bold transition-all cursor-pointer sm:w-auto sm:justify-between ${
               activeTab === "current"
                 ? "bg-yellow-400 text-[#2c221a] shadow-lg shadow-yellow-400/20"
                 : "bg-white/5 text-[#f4efe5]/70 hover:bg-white/10 hover:text-white border border-white/10"
             }`}
           >
-            <Package className="w-4 h-4" />
+            <Package className="absolute left-4 w-4 h-4 sm:static" />
             <span>Currently Posted Requests</span>
             <span
-              className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+              className={`absolute right-4 text-[10px] font-mono px-2 py-0.5 rounded-full sm:static ${
                 activeTab === "current" ? "bg-[#2c221a]/20 text-[#2c221a]" : "bg-white/10 text-[#f4efe5]"
               }`}
             >
@@ -1020,19 +1516,19 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
 
           <button
             onClick={() => setActiveTab("create")}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-full text-xs sm:text-sm font-sans font-bold transition-all cursor-pointer ${
+            className={`relative flex w-full items-center justify-center gap-2 px-4 py-2.5 rounded-full text-xs sm:text-sm font-sans font-bold transition-all cursor-pointer sm:w-auto sm:justify-between ${
               activeTab === "create"
                 ? "bg-[#82afa6] text-[#1c1814] shadow-lg shadow-[#82afa6]/20"
                 : "bg-white/5 text-[#f4efe5]/70 hover:bg-white/10 hover:text-white border border-white/10"
             }`}
           >
-            <Plus className="w-4 h-4 stroke-[3]" />
+            <Plus className="absolute left-4 w-4 h-4 stroke-[3] sm:static" />
             <span>Add New Request</span>
           </button>
 
           <button
             onClick={() => setActiveTab("campaigns")}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-full text-xs sm:text-sm font-sans font-bold transition-all cursor-pointer ${
+            className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 rounded-full text-xs sm:text-sm font-sans font-bold transition-all cursor-pointer sm:w-auto ${
               activeTab === "campaigns"
                 ? "bg-purple-500 text-white shadow-lg shadow-purple-500/20"
                 : "bg-white/5 text-[#f4efe5]/70 hover:bg-white/10 hover:text-white border border-white/10"
@@ -1045,13 +1541,13 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
                 activeTab === "campaigns" ? "bg-white/20 text-white" : "bg-white/10 text-[#f4efe5]"
               }`}
             >
-              {campaigns.length}
+              {userCampaigns.length}
             </span>
           </button>
 
           <button
             onClick={() => setActiveTab("history")}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-full text-xs sm:text-sm font-sans font-bold transition-all cursor-pointer ${
+            className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 rounded-full text-xs sm:text-sm font-sans font-bold transition-all cursor-pointer sm:w-auto ${
               activeTab === "history"
                 ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20"
                 : "bg-white/5 text-[#f4efe5]/70 hover:bg-white/10 hover:text-white border border-white/10"
@@ -1094,7 +1590,7 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
               </div>
 
               {/* Search Bar */}
-              <div className="relative min-w-[240px]">
+              <div className="relative w-full md:min-w-[240px]">
                 <Search className="w-4 h-4 text-[#f4efe5]/40 absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
@@ -1175,9 +1671,9 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
                                 </span>
                               );
                             })}
-                            {req.urgencyLevel === "high" && (
+                            {(req.urgencyLevel === "emergency" || req.urgencyLevel === "high") && (
                               <span className="bg-rose-500 text-white text-[9px] font-mono px-2 py-0.5 rounded-full font-bold animate-pulse">
-                                URGENT
+                                EMERGENCY
                               </span>
                             )}
                           </div>
@@ -1288,8 +1784,14 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
                             </div>
                             <div className="flex items-center gap-1.5">
                               <Clock className="w-3.5 h-3.5 text-yellow-400/80 shrink-0" />
-                              <span>Posted: {req.postedDate}</span>
+                              <span>Posted: {formatRequestPostedDate(req.postedDate, req.postedTimestamp)}</span>
                             </div>
+                            {req.updates && req.updates.length > 0 && (
+                              <div className="flex items-center gap-1.5 text-amber-300 font-bold">
+                                <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                <span>{req.updates.length} {req.updates.length === 1 ? "Donor Update" : "Donor Updates"}</span>
+                              </div>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -1342,514 +1844,774 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
           </div>
         )}
 
-        {/* TAB 2: ADD NEW REQUEST FORM */}
+        {/* TAB 2: ADD NEW REQUEST FORM (HORIZONTAL & CONSISTENT WITH BROWSE NEEDS) */}
         {activeTab === "create" && (
-          <div className="max-w-3xl mx-auto bg-[#26201a] rounded-3xl border border-white/10 p-6 sm:p-10 shadow-2xl space-y-6">
+          <div className="max-w-6xl xl:max-w-7xl mx-auto bg-[#26201a] rounded-3xl border border-white/10 p-6 sm:p-8 lg:p-10 shadow-2xl space-y-8">
             
-            <div className="border-b border-white/10 pb-4">
-              <div className="flex items-center gap-2 text-yellow-400 font-mono text-xs mb-1">
-                <Plus className="w-4 h-4 stroke-[3]" />
-                <span>NEW RECIPIENT SUPPLY LISTING</span>
+            {/* Header */}
+            <div className="border-b border-white/10 pb-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-yellow-400 font-mono text-xs mb-1.5 font-bold tracking-wider">
+                  <Plus className="w-4 h-4 stroke-[3]" />
+                  <span>NEW RECIPIENT SUPPLY LISTING</span>
+                  <span className="text-white/30">•</span>
+                  <span className="text-[#82afa6] text-[11px] font-mono font-normal">Consistent with Browse Needs Catalog</span>
+                </div>
+                <h3 className="text-2xl sm:text-3xl font-serif text-[#f4efe5] font-bold">
+                  Post What You Need
+                </h3>
+                <p className="text-xs sm:text-sm text-[#f4efe5]/70 mt-1 max-w-2xl">
+                  Specify detailed item attributes, photos, and delivery instructions so donors can accurately match, pack, and pledge exactly what your community requires.
+                </p>
               </div>
-              <h3 className="text-2xl font-serif text-[#f4efe5] font-bold">
-                Post What You Need
-              </h3>
-              <p className="text-xs text-[#f4efe5]/70 mt-1">
-                Provide accurate details and photos to help donors quickly match and deliver exactly what is needed.
-              </p>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("current")}
+                  className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-xs font-mono text-[#f4efe5] border border-white/10 transition-colors cursor-pointer"
+                >
+                  Back to My Requests
+                </button>
+              </div>
             </div>
 
-            <form onSubmit={handleSubmitNewRequest} className="space-y-6">
+            <form onSubmit={handleSubmitNewRequest} className="space-y-8">
               
-              {/* 1. MULTI-PHOTO UPLOAD SECTION */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="block text-xs font-mono text-yellow-400 uppercase tracking-wider">
-                    1. Upload Picture(s) of Requested Item *
-                  </label>
-                  {reqImages.length > 0 && (
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] font-mono text-emerald-300 font-bold flex items-center gap-1">
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>{reqImages.length} photo(s) attached</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={handleClearAllReqImages}
-                        className="text-[10px] font-mono text-rose-300 hover:text-rose-200 underline cursor-pointer"
+              {/* HORIZONTAL 2-COLUMN GRID */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                
+                {/* LEFT COLUMN: PHOTOS & REAL-TIME PREVIEW CARD (5 COLS) */}
+                <div className="lg:col-span-5 space-y-6">
+                  
+                  {/* Photo Upload & Gallery */}
+                  <div className="bg-black/30 border border-white/10 rounded-2xl p-5 space-y-4 shadow-inner">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>1. Item Photo(s) *</span>
+                      </label>
+                      {reqImages.length > 0 && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-mono text-emerald-300 font-bold flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>{reqImages.length} attached</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleClearAllReqImages}
+                            className="text-[10px] font-mono text-rose-300 hover:text-rose-200 underline cursor-pointer"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Upload Dropzone */}
+                    {reqImages.length === 0 ? (
+                      <div
+                        onDragOver={handleDragOver}
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                        className={`border-2 border-dashed rounded-2xl p-6 text-center transition-all ${
+                          isDragOver
+                            ? "border-yellow-400 bg-yellow-400/10 scale-[1.01]"
+                            : "border-white/20 hover:border-yellow-400/50 bg-black/40"
+                        }`}
                       >
-                        Clear all
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                {/* Upload Zone & Gallery */}
-                {reqImages.length === 0 ? (
-                  <div
-                    onDragOver={handleDragOver}
-                    onDragLeave={handleDragLeave}
-                    onDrop={handleDrop}
-                    className={`border-2 border-dashed rounded-2xl p-7 text-center transition-all ${
-                      isDragOver
-                        ? "border-yellow-400 bg-yellow-400/10 scale-[1.01]"
-                        : "border-white/20 hover:border-yellow-400/50 bg-black/30"
-                    }`}
-                  >
-                    <div className="space-y-3">
-                      <div className="w-14 h-14 rounded-2xl bg-yellow-400/10 border border-yellow-400/20 flex items-center justify-center mx-auto text-yellow-400">
-                        <Upload className="w-7 h-7" />
-                      </div>
-                      <div>
-                        <p className="text-sm text-[#f4efe5] font-medium">
-                          Drag and drop item image(s) here, or{" "}
-                          <label className="text-yellow-400 hover:underline font-bold cursor-pointer inline-flex items-center gap-1">
-                            browse files
-                            <input
-                              type="file"
-                              multiple
-                              accept="image/*"
-                              className="hidden"
-                              onChange={(e) => {
-                                if (e.target.files && e.target.files.length > 0) {
-                                  handleMultipleImageFiles(e.target.files);
-                                  e.target.value = "";
-                                }
-                              }}
-                            />
-                          </label>
-                        </p>
-                        <p className="text-xs font-mono text-[#f4efe5]/50 mt-1.5">
-                          Upload 1 or more photos (PNG, JPG, WEBP). Select multiple files at once.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-4 bg-black/30 border border-white/10 rounded-2xl p-4 sm:p-5">
-                    {/* Active Primary Cover Preview */}
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
-                      <div className="relative h-48 md:h-52 w-full rounded-2xl overflow-hidden border-2 border-yellow-400/80 shadow-2xl bg-black/60">
-                        <img
-                          src={reqImages[primaryImageIndex] || reqImages[0]}
-                          alt="Primary Preview"
-                          className="w-full h-full object-cover"
-                          referrerPolicy="no-referrer"
-                        />
-                        <div className="absolute top-2.5 left-2.5 bg-yellow-400 text-[#2c221a] text-[10px] font-mono font-bold px-2.5 py-1 rounded-full shadow flex items-center gap-1">
-                          <Star className="w-3 h-3 fill-current" />
-                          <span>Primary Cover Photo</span>
-                        </div>
-                        <div className="absolute bottom-2.5 right-2.5 bg-black/80 backdrop-blur-sm text-[#f4efe5] text-[10px] font-mono px-2 py-0.5 rounded-full border border-white/20">
-                          Photo #{primaryImageIndex + 1}
+                        <div className="space-y-2.5">
+                          <div className="w-12 h-12 rounded-2xl bg-yellow-400/10 border border-yellow-400/20 flex items-center justify-center mx-auto text-yellow-400">
+                            <Upload className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <p className="text-xs sm:text-sm text-[#f4efe5] font-medium">
+                              Drag photos here, or{" "}
+                              <label className="text-yellow-400 hover:underline font-bold cursor-pointer inline-flex items-center gap-1">
+                                browse files
+                                <input
+                                  type="file"
+                                  multiple
+                                  accept="image/*"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    if (e.target.files && e.target.files.length > 0) {
+                                      handleMultipleImageFiles(e.target.files);
+                                      e.target.value = "";
+                                    }
+                                  }}
+                                />
+                              </label>
+                            </p>
+                            <p className="text-[10px] font-mono text-[#f4efe5]/50 mt-1">
+                              Supports multiple PNG, JPG, WEBP photos
+                            </p>
+                          </div>
                         </div>
                       </div>
-
-                      {/* Photo details & Add More prompt */}
-                      <div className="md:col-span-2 space-y-3">
-                        <div className="space-y-1">
-                          <h4 className="text-sm font-serif font-bold text-[#f4efe5]">
-                            Manage Uploaded Photos ({reqImages.length})
-                          </h4>
-                          <p className="text-xs text-[#f4efe5]/70">
-                            Click any thumbnail below to preview or set it as the primary cover photo donors see first. You can upload additional photos anytime.
-                          </p>
+                    ) : (
+                      <div className="space-y-3">
+                        {/* Primary Image Display */}
+                        <div className="relative h-44 w-full rounded-xl overflow-hidden border-2 border-yellow-400/80 shadow bg-black/60">
+                          <img
+                            src={reqImages[primaryImageIndex] || reqImages[0]}
+                            alt="Primary Preview"
+                            className="w-full h-full object-cover"
+                            referrerPolicy="no-referrer"
+                          />
+                          <div className="absolute top-2 left-2 bg-yellow-400 text-[#2c221a] text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full shadow flex items-center gap-1">
+                            <Star className="w-3 h-3 fill-current" />
+                            <span>Cover Photo</span>
+                          </div>
+                          <div className="absolute bottom-2 right-2 bg-black/80 backdrop-blur-sm text-[#f4efe5] text-[10px] font-mono px-2 py-0.5 rounded-full border border-white/20">
+                            #{primaryImageIndex + 1} of {reqImages.length}
+                          </div>
                         </div>
 
-                        {/* Add More Photos Button */}
-                        <div className="flex flex-wrap items-center gap-2 pt-1">
-                          <label className="px-4 py-2 bg-white/10 hover:bg-white/20 text-[#f4efe5] border border-white/20 rounded-xl text-xs font-mono font-bold cursor-pointer transition-all flex items-center gap-1.5 shadow">
-                            <PlusCircle className="w-4 h-4 text-yellow-400" />
-                            <span>Add More Photos</span>
-                            <input
-                              type="file"
-                              multiple
-                              accept="image/*"
-                              className="hidden"
-                              onChange={(e) => {
-                                if (e.target.files && e.target.files.length > 0) {
-                                  handleMultipleImageFiles(e.target.files);
-                                  e.target.value = "";
-                                }
-                              }}
-                            />
-                          </label>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Thumbnails Gallery Grid */}
-                    <div className="space-y-2 pt-2 border-t border-white/10">
-                      <span className="text-[10px] font-mono text-[#f4efe5]/60 uppercase">
-                        All Attached Images ({reqImages.length}):
-                      </span>
-                      <div className="grid grid-cols-3 sm:grid-cols-6 md:grid-cols-8 gap-2.5">
-                        {reqImages.map((imgUrl, imgIdx) => {
-                          const isPrimary = imgIdx === primaryImageIndex;
-                          return (
-                            <div
-                              key={imgIdx}
-                              onClick={() => setPrimaryImageIndex(imgIdx)}
-                              className={`group relative h-20 rounded-xl overflow-hidden border-2 transition-all cursor-pointer ${
-                                isPrimary
-                                  ? "border-yellow-400 ring-2 ring-yellow-400/50 scale-105 shadow-lg"
-                                  : "border-white/15 hover:border-white/50 opacity-85 hover:opacity-100"
-                              }`}
-                            >
-                              <img
-                                src={imgUrl}
-                                alt={`Item ${imgIdx + 1}`}
-                                className="w-full h-full object-cover"
-                                referrerPolicy="no-referrer"
+                        {/* Thumbnails Gallery */}
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between text-[10px] font-mono text-[#f4efe5]/60">
+                            <span>Click to set cover photo:</span>
+                            <label className="text-yellow-400 hover:underline font-bold cursor-pointer flex items-center gap-1">
+                              <Plus className="w-3 h-3" />
+                              <span>Add more</span>
+                              <input
+                                type="file"
+                                multiple
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                  if (e.target.files && e.target.files.length > 0) {
+                                    handleMultipleImageFiles(e.target.files);
+                                    e.target.value = "";
+                                  }
+                                }}
                               />
-                              
-                              {/* Index badge */}
-                              <span className="absolute top-1 left-1 bg-black/80 text-white text-[9px] font-mono px-1.5 py-0.5 rounded">
-                                #{imgIdx + 1}
-                              </span>
-
-                              {/* Star indicator for primary */}
-                              {isPrimary && (
-                                <span className="absolute top-1 right-1 bg-yellow-400 text-black p-0.5 rounded-full shadow">
-                                  <Star className="w-2.5 h-2.5 fill-current" />
-                                </span>
-                              )}
-
-                              {/* Hover actions */}
-                              <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1.5 p-1">
-                                {!isPrimary && (
+                            </label>
+                          </div>
+                          <div className="grid grid-cols-4 sm:grid-cols-5 gap-2">
+                            {reqImages.map((imgUrl, imgIdx) => {
+                              const isPrimary = imgIdx === primaryImageIndex;
+                              return (
+                                <div
+                                  key={imgIdx}
+                                  onClick={() => setPrimaryImageIndex(imgIdx)}
+                                  className={`group relative h-14 rounded-lg overflow-hidden border-2 transition-all cursor-pointer ${
+                                    isPrimary
+                                      ? "border-yellow-400 ring-2 ring-yellow-400/50 scale-105 shadow"
+                                      : "border-white/15 hover:border-white/50 opacity-80 hover:opacity-100"
+                                  }`}
+                                >
+                                  <img
+                                    src={imgUrl}
+                                    alt={`Upload ${imgIdx + 1}`}
+                                    className="w-full h-full object-cover"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                  <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-white px-1 rounded">
+                                    #{imgIdx + 1}
+                                  </span>
+                                  {isPrimary && (
+                                    <span className="absolute top-0.5 right-0.5 bg-yellow-400 text-black p-0.5 rounded-full">
+                                      <Star className="w-2 h-2 fill-current" />
+                                    </span>
+                                  )}
                                   <button
                                     type="button"
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      handleSetPrimaryImage(imgIdx);
+                                      handleRemoveReqImage(imgIdx);
                                     }}
-                                    title="Set as Cover"
-                                    className="p-1 rounded-full bg-yellow-400 text-black hover:scale-110 transition-transform"
+                                    className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-rose-300 hover:text-rose-200"
+                                    title="Remove this photo"
                                   >
-                                    <Star className="w-3 h-3 fill-current" />
+                                    <Trash2 className="w-3.5 h-3.5" />
                                   </button>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleRemoveReqImage(imgIdx);
-                                  }}
-                                  title="Delete this image"
-                                  className="p-1 rounded-full bg-rose-600 hover:bg-rose-500 text-white hover:scale-110 transition-transform"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
-                              </div>
-                            </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Quick Presets */}
+                    <div className="pt-2 border-t border-white/10 space-y-1.5">
+                      <span className="text-[10px] font-mono text-[#f4efe5]/50 block">
+                        Quick Add Common Aid Preset Images:
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {SAMPLE_PRESET_IMAGES.map((p, pIdx) => {
+                          const isAdded = reqImages.includes(p.url);
+                          return (
+                            <button
+                              key={pIdx}
+                              type="button"
+                              onClick={() => {
+                                if (isAdded) {
+                                  setReqImages((prev) => prev.filter((u) => u !== p.url));
+                                } else {
+                                  setReqImages((prev) => [...prev, p.url]);
+                                }
+                              }}
+                              className={`px-2.5 py-1 rounded-lg text-[10px] font-mono transition-all border flex items-center gap-1 cursor-pointer ${
+                                isAdded
+                                  ? "bg-yellow-400/20 border-yellow-400 text-yellow-300 font-bold"
+                                  : "bg-white/5 border-white/10 text-[#f4efe5]/70 hover:bg-white/10 hover:text-white"
+                              }`}
+                            >
+                              {isAdded ? <Check className="w-2.5 h-2.5" /> : <Plus className="w-2.5 h-2.5 text-yellow-400" />}
+                              <span>{p.label}</span>
+                            </button>
                           );
                         })}
                       </div>
                     </div>
                   </div>
-                )}
 
-                {/* Quick Preset Samples to append or use */}
-                <div className="pt-2">
-                  <span className="text-[10px] font-mono text-[#f4efe5]/50 block mb-1.5">
-                    Or quickly select standard aid supply templates:
-                  </span>
-                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
-                    {SAMPLE_PRESET_IMAGES.map((preset, idx) => {
-                      const isAlreadyAdded = reqImages.includes(preset.url);
-                      return (
-                        <button
-                          key={idx}
-                          type="button"
-                          onClick={() => {
-                            if (!reqImages.includes(preset.url)) {
-                              setReqImages((prev) => [...prev, preset.url]);
-                              showToast(`Added "${preset.label}" image.`);
-                            }
-                            if (!reqTitle) setReqTitle(preset.label);
-                            if (!reqCategories.includes(preset.category)) {
-                              setReqCategories((prev) => Array.from(new Set([...prev, preset.category])));
-                            }
-                          }}
-                          className={`group relative h-14 rounded-xl overflow-hidden border transition-all cursor-pointer ${
-                            isAlreadyAdded
-                              ? "border-emerald-400 ring-2 ring-emerald-400/50 scale-105"
-                              : "border-white/10 hover:border-white/40 opacity-70 hover:opacity-100"
-                          }`}
-                          title={`Add ${preset.label}`}
-                        >
-                          <img
-                            src={preset.url}
-                            alt={preset.label}
-                            className="w-full h-full object-cover"
-                            referrerPolicy="no-referrer"
-                          />
-                          <div className="absolute inset-0 bg-black/40 group-hover:bg-transparent transition-colors" />
-                          <span className="absolute bottom-0 inset-x-0 bg-black/80 text-[8px] font-mono text-[#f4efe5] p-0.5 truncate text-center">
-                            {preset.label.split(" ")[0]}
-                          </span>
-                          {isAlreadyAdded && (
-                            <span className="absolute top-1 right-1 bg-emerald-500 text-white p-0.5 rounded-full">
-                              <Check className="w-2.5 h-2.5" />
+                  {/* LIVE PREVIEW CARD (BROWSE NEEDS APPEARANCE) */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-mono text-[#82afa6] uppercase tracking-wider font-bold flex items-center gap-1.5">
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Live Catalog Preview</span>
+                      </label>
+                      <span className="text-[10px] font-mono text-[#f4efe5]/50">
+                        How donors see this item
+                      </span>
+                    </div>
+
+                    <div className="bg-[#1c1815] rounded-2xl border border-yellow-400/30 overflow-hidden shadow-xl">
+                      {/* Preview Image */}
+                      <div className="relative h-44 w-full bg-black/60">
+                        <img
+                          src={
+                            reqImages[primaryImageIndex] ||
+                            reqImages[0] ||
+                            SAMPLE_PRESET_IMAGES.find((p) => reqCategories.includes(p.category))?.url ||
+                            SAMPLE_PRESET_IMAGES[0].url
+                          }
+                          alt="Preview Card"
+                          className="w-full h-full object-cover"
+                          referrerPolicy="no-referrer"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/30" />
+
+                        {/* Urgency Badge */}
+                        <div className="absolute top-2.5 left-2.5">
+                          {reqUrgency === "emergency" && (
+                            <span className="px-2 py-0.5 rounded-full bg-rose-600/90 text-white font-mono text-[9px] font-bold uppercase tracking-wider border border-rose-400/30 shadow">
+                              🚨 Critical Emergency
                             </span>
                           )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
+                          {reqUrgency === "important" && (
+                            <span className="px-2 py-0.5 rounded-full bg-amber-500/90 text-black font-mono text-[9px] font-bold uppercase tracking-wider border border-amber-300 shadow">
+                              ⚠️ Important Need
+                            </span>
+                          )}
+                          {reqUrgency === "standard" && (
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-700/90 text-white font-mono text-[9px] font-bold uppercase tracking-wider border border-emerald-400/30 shadow">
+                              Standard Aid
+                            </span>
+                          )}
+                        </div>
 
-              {/* 2. TITLE & CATEGORY LABEL */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                
-                {/* Title (Name of item) */}
-                <div className="space-y-1.5 sm:col-span-2">
-                  <label className="block text-xs font-mono text-yellow-400 uppercase tracking-wider">
-                    2. Title of Request (Item Name) *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={reqTitle}
-                    onChange={(e) => setReqTitle(e.target.value)}
-                    placeholder="e.g. Enfamil Baby Formula Step 1 (850g) / Adult Diapers XL"
-                    className="w-full bg-black/40 border border-white/15 rounded-xl px-4 py-3 text-sm text-[#f4efe5] placeholder-[#f4efe5]/40 focus:outline-none focus:border-yellow-400 transition-colors"
-                  />
+                        {/* Quantity Pill */}
+                        <div className="absolute bottom-2.5 right-2.5 bg-black/80 backdrop-blur-sm px-2.5 py-0.5 rounded-full border border-white/20 text-[10px] font-mono font-bold text-yellow-400 shadow">
+                          {reqQuantity} {reqUnit} Needed
+                        </div>
+
+                        {/* Campaign Label if attached */}
+                        {reqSelectedCampaignId && (
+                          <div className="absolute bottom-2.5 left-2.5 bg-purple-950/80 backdrop-blur-sm px-2 py-0.5 rounded-full border border-purple-400/30 text-[9px] font-mono text-purple-200">
+                            📦 {campaigns.find((c) => c.id === reqSelectedCampaignId)?.title || "Campaign Request"}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Preview Body */}
+                      <div className="p-4 space-y-3">
+                        {/* Categories & Badges */}
+                        <div className="flex flex-wrap gap-1">
+                          {reqCategories.map((c) => {
+                            const style = CATEGORY_COLORS[c] || CATEGORY_COLORS.Others;
+                            return (
+                              <span
+                                key={c}
+                                className={`px-2 py-0.5 rounded-md text-[9px] font-mono font-bold border ${style.bg} ${style.text} ${style.border}`}
+                              >
+                                {c.toUpperCase()}
+                              </span>
+                            );
+                          })}
+                        </div>
+
+                        {/* Title */}
+                        <h4 className="font-serif font-bold text-sm text-[#f4efe5] line-clamp-2">
+                          {reqTitle.trim() || "Item Supply Title"}
+                        </h4>
+
+                        {/* Specification Pills (Browse Needs Consistent) */}
+                        <div className="grid grid-cols-2 gap-1.5 text-[10px] font-mono bg-black/40 p-2 rounded-xl border border-white/5">
+                          <div className="text-[#f4efe5]/70">
+                            <span className="text-[#f4efe5]/40">Brand: </span>
+                            <span className="text-yellow-300 font-bold">{reqBrand || "Any brand"}</span>
+                          </div>
+                          <div className="text-[#f4efe5]/70">
+                            <span className="text-[#f4efe5]/40">Colour: </span>
+                            <span className="text-yellow-300 font-bold">{reqColor || "Any"}</span>
+                          </div>
+                          <div className="col-span-2 text-[#f4efe5]/70 truncate">
+                            <span className="text-[#f4efe5]/40">Labels: </span>
+                            <span className="text-emerald-300">{[...reqCategories.filter((category) => category !== "Others"), ...reqCustomCategory.split(",").map((label) => label.trim()).filter(Boolean)].join(", ") || "None selected"}</span>
+                          </div>
+                        </div>
+
+                        {/* Description */}
+                        <p className="text-[11px] text-[#f4efe5]/70 line-clamp-2 leading-relaxed">
+                          {reqDesc.trim() || "Essential goods needed for community relief support."}
+                        </p>
+
+                        {/* Progress Bar */}
+                        <div className="space-y-1 pt-1">
+                          <div className="flex justify-between text-[10px] font-mono text-[#f4efe5]/60">
+                            <span>Pledges: 0 / {reqQuantity} {reqUnit}</span>
+                            <span className="text-yellow-400 font-bold">0%</span>
+                          </div>
+                          <div className="w-full h-1.5 bg-black/50 rounded-full overflow-hidden border border-white/10">
+                            <div className="w-0 h-full bg-gradient-to-r from-yellow-400 to-emerald-400" />
+                          </div>
+                        </div>
+
+                        {/* Meta: Location & Organizer */}
+                        <div className="pt-2 border-t border-white/10 space-y-1 text-[10px] font-mono text-[#f4efe5]/60">
+                          <div className="flex items-center gap-1.5 truncate">
+                            <MapPin className="w-3 h-3 text-[#82afa6] shrink-0" />
+                            <span className="truncate">{reqLocation.trim() || (user?.location?.state ? `${user.location.state}, Malaysia` : "Community Support Hub, Perak")}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 truncate">
+                            <Building className="w-3 h-3 text-yellow-400/80 shrink-0" />
+                            <span className="truncate">{reqOrganizerName.trim() || user?.charityName || user?.username || "Hope Community Aid (NGO)"}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
                 </div>
 
-                {/* Category Label (Multiple Selection & Custom Labels) */}
-                <div className="space-y-2 sm:col-span-2">
-                  <div className="flex items-center justify-between">
-                    <label className="block text-xs font-mono text-yellow-400 uppercase tracking-wider">
-                      3. Label / Category of Request (Multiple Selectable) *
-                    </label>
-                    <span className="text-[10px] font-mono text-[#f4efe5]/60">
-                      {reqCategories.length} selected
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {STANDARD_CATEGORIES.map((cat) => {
-                      const isSelected = reqCategories.includes(cat);
-                      const style = CATEGORY_COLORS[cat] || CATEGORY_COLORS.Others;
-                      return (
-                        <button
-                          key={cat}
-                          type="button"
-                          onClick={() => {
-                            if (isSelected) {
-                              if (reqCategories.length > 1) {
-                                setReqCategories(reqCategories.filter((c) => c !== cat));
-                              } else {
-                                setReqCategories([]);
-                              }
-                            } else {
-                              setReqCategories([...reqCategories, cat]);
-                            }
-                          }}
-                          className={`p-3 rounded-xl border text-xs font-mono font-bold flex items-center justify-between transition-all cursor-pointer ${
-                            isSelected
-                              ? `${style.bg} ${style.text} ${style.border} ring-2 ring-yellow-400/50 shadow-md`
-                              : "bg-black/30 border-white/10 text-[#f4efe5]/60 hover:bg-black/50 hover:text-white"
-                          }`}
+                {/* RIGHT COLUMN: FORM FIELDS (7 COLS) */}
+                <div className="lg:col-span-7 space-y-6">
+
+                  {/* Section 1: Item Title & Campaign Assignment */}
+                  <div className="bg-black/30 border border-white/10 rounded-2xl p-5 space-y-4">
+                    <div className="space-y-1">
+                      <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                        <FileText className="w-3.5 h-3.5" />
+                        <span>2. Item Title & Campaign Assignment *</span>
+                      </label>
+                      <p className="text-[11px] text-[#f4efe5]/60">
+                        Specify exact product brand, model or generic description.
+                      </p>
+                    </div>
+
+                    <input
+                      type="text"
+                      required
+                      value={reqTitle}
+                      onChange={(e) => setReqTitle(formatCapitalizedTitle(e.target.value))}
+                      onBlur={(e) => setReqTitle(formatCapitalizedTitle(e.target.value.trim()))}
+                      placeholder="e.g. Baby Pampers (Size M) / Enfamil Infant Formula"
+                      className="w-full bg-black/50 border border-white/15 rounded-xl px-4 py-3 text-sm text-[#f4efe5] placeholder-[#f4efe5]/30 focus:outline-none focus:border-yellow-400 transition-colors font-medium"
+                    />
+
+                    {/* Campaign Dropdown */}
+                    {userCampaigns.length > 0 && (
+                      <div className="space-y-1 pt-1">
+                        <label className="text-[11px] font-mono text-[#82afa6] font-bold flex items-center gap-1.5">
+                          <Layers className="w-3 h-3" />
+                          <span>Group into Existing Campaign (Optional):</span>
+                        </label>
+                        <select
+                          value={reqSelectedCampaignId}
+                          onChange={(e) => setReqSelectedCampaignId(e.target.value)}
+                          className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-[#82afa6] cursor-pointer"
                         >
-                          <span>{cat}</span>
-                          {isSelected && <Check className="w-3.5 h-3.5 text-yellow-400 shrink-0 ml-1" />}
-                        </button>
-                      );
-                    })}
+                          <option value="">No Campaign (Independent Request)</option>
+                          {userCampaigns.map((camp) => (
+                            <option key={camp.id} value={camp.id}>
+                              {camp.bannerEmoji || "📦"} {camp.title} ({camp.category})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
                   </div>
 
-                  {/* Custom label input if "Others" is selected */}
-                  <AnimatePresence>
-                    {reqCategories.includes("Others") && (
-                      <motion.div
-                        initial={{ opacity: 0, y: -5, height: 0 }}
-                        animate={{ opacity: 1, y: 0, height: "auto" }}
-                        exit={{ opacity: 0, y: -5, height: 0 }}
-                        className="overflow-hidden pt-1"
-                      >
-                        <div className="bg-stone-900/80 border border-amber-400/40 rounded-xl p-3.5 space-y-2">
-                          <div className="flex items-center justify-between">
+                  {/* Section 2: Categories / Labels (Multi-Selectable) */}
+                  <div className="bg-black/30 border border-white/10 rounded-2xl p-5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                        <Tag className="w-3.5 h-3.5" />
+                        <span>3. Categories / Labels (Multi-Selectable) *</span>
+                      </label>
+                      <span className="text-[10px] font-mono text-[#f4efe5]/60">
+                        {reqCategories.length} selected
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {STANDARD_CATEGORIES.map((cat) => {
+                        const isSelected = reqCategories.includes(cat);
+                        const style = CATEGORY_COLORS[cat] || CATEGORY_COLORS.Others;
+                        return (
+                          <button
+                            key={cat}
+                            type="button"
+                            onClick={() => {
+                              if (isSelected) {
+                                if (reqCategories.length > 1) {
+                                  setReqCategories(reqCategories.filter((c) => c !== cat));
+                                }
+                              } else {
+                                setReqCategories([...reqCategories, cat]);
+                              }
+                            }}
+                            className={`p-2.5 rounded-xl border text-xs font-mono font-bold flex items-center justify-between transition-all cursor-pointer ${
+                              isSelected
+                                ? `${style.bg} ${style.text} ${style.border} ring-1 ring-yellow-400/50 shadow`
+                                : "bg-black/40 border-white/10 text-[#f4efe5]/60 hover:bg-black/60 hover:text-white"
+                            }`}
+                          >
+                            <span>{cat}</span>
+                            {isSelected && <Check className="w-3.5 h-3.5 text-yellow-400 shrink-0 ml-1" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Custom Tag Input */}
+                    <AnimatePresence>
+                      {reqCategories.includes("Others") && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: "auto" }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="overflow-hidden pt-2"
+                        >
+                          <div className="bg-stone-900/90 border border-amber-400/40 rounded-xl p-3 space-y-1.5">
                             <label className="text-[11px] font-mono text-amber-300 font-bold flex items-center gap-1.5">
                               <Tag className="w-3.5 h-3.5" />
-                              <span>Specify Custom Label(s) / Tag(s) *</span>
+                              <span>Custom Label(s) (comma-separated)</span>
                             </label>
-                            <span className="text-[10px] font-mono text-[#f4efe5]/50">
-                              Separate with commas if multiple
-                            </span>
+                            <input
+                              type="text"
+                              value={reqCustomCategory}
+                              onChange={(e) => setReqCustomCategory(e.target.value)}
+                              placeholder="e.g. Baby Formula, Clean Water Filters, Diapers"
+                              className="w-full bg-black/60 border border-white/20 rounded-lg px-3 py-2 text-xs text-[#f4efe5] placeholder-[#f4efe5]/40 focus:outline-none focus:border-amber-400"
+                            />
                           </div>
-                          <input
-                            type="text"
-                            value={reqCustomCategory}
-                            onChange={(e) => setReqCustomCategory(e.target.value)}
-                            placeholder="e.g. Baby Formula, Clean Water Filters, Solar Battery, Hygiene Kits"
-                            className="w-full bg-black/60 border border-white/20 rounded-lg px-3.5 py-2 text-xs text-[#f4efe5] placeholder-[#f4efe5]/40 focus:outline-none focus:border-amber-400 transition-colors"
-                          />
-                        </div>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              </div>
-
-              {/* 3. QUANTITY & UNIT */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="space-y-1.5 sm:col-span-2">
-                  <label className="block text-xs font-mono text-yellow-400 uppercase tracking-wider">
-                    4. Quantity Needed *
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min="1"
-                      required
-                      value={reqQuantity}
-                      onChange={(e) => setReqQuantity(Math.max(1, parseInt(e.target.value) || 1))}
-                      className="w-32 bg-black/40 border border-white/15 rounded-xl px-4 py-2.5 text-sm text-[#f4efe5] focus:outline-none focus:border-yellow-400"
-                    />
-                    <select
-                      value={reqUnit}
-                      onChange={(e) => setReqUnit(e.target.value)}
-                      className="bg-black/40 border border-white/15 rounded-xl px-4 py-2.5 text-sm text-[#f4efe5] focus:outline-none focus:border-yellow-400 cursor-pointer"
-                    >
-                      <option value="packs">packs</option>
-                      <option value="units">units / items</option>
-                      <option value="boxes">boxes</option>
-                      <option value="tins">tins / cans</option>
-                      <option value="bags (10kg)">bags (10kg)</option>
-                      <option value="sets">sets</option>
-                      <option value="bottles">bottles</option>
-                    </select>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
-                </div>
 
-                <div className="space-y-1.5">
-                  <label className="block text-xs font-mono text-yellow-400 uppercase tracking-wider">
-                    Urgency Level
-                  </label>
-                  <select
-                    value={reqUrgency}
-                    onChange={(e) => setReqUrgency(e.target.value as any)}
-                    className="w-full bg-black/40 border border-white/15 rounded-xl px-4 py-2.5 text-sm text-[#f4efe5] focus:outline-none focus:border-yellow-400 cursor-pointer"
-                  >
-                    <option value="standard">Standard Aid</option>
-                    <option value="medium">Important</option>
-                    <option value="high">🚨 Critical Emergency</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* 4. DESCRIPTION */}
-              <div className="space-y-1.5">
-                <label className="block text-xs font-mono text-yellow-400 uppercase tracking-wider">
-                  5. Description of Item Needed *
-                </label>
-                <textarea
-                  required
-                  rows={3}
-                  value={reqDesc}
-                  onChange={(e) => setReqDesc(e.target.value)}
-                  placeholder="Provide essential details: target family context, specific brand or specifications, dietary restrictions, condition required..."
-                  className="w-full bg-black/40 border border-white/15 rounded-xl p-4 text-xs text-[#f4efe5] placeholder-[#f4efe5]/40 focus:outline-none focus:border-yellow-400 leading-relaxed"
-                />
-              </div>
-
-              {/* 5. POSTED DATE & TIME and LOCATION */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                
-                {/* Posted Date & Time */}
-                <div className="space-y-1.5">
-                  <label className="block text-xs font-mono text-yellow-400 uppercase tracking-wider">
-                    6. Posted Date & Time
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="text"
-                      value={reqPostedDateTime}
-                      onChange={(e) => setReqPostedDateTime(e.target.value)}
-                      className="w-full bg-black/40 border border-white/15 rounded-xl pl-9 pr-4 py-2.5 text-xs text-[#f4efe5] font-mono focus:outline-none focus:border-yellow-400"
-                    />
-                    <Calendar className="w-4 h-4 text-[#82afa6] absolute left-3 top-1/2 -translate-y-1/2" />
-                  </div>
-                  <span className="text-[10px] font-mono text-[#f4efe5]/40">
-                    Auto-generated timestamp
-                  </span>
-                </div>
-
-                {/* Location */}
-                <div className="space-y-1.5">
-                  <div className="flex justify-between items-center">
-                    <label className="block text-xs font-mono text-yellow-400 uppercase tracking-wider">
-                      7. Dropoff / Pickup Location *
+                  {/* Section 3: Item Specifications (Brand, Colour, Tags) */}
+                  <div className="bg-black/30 border border-white/10 rounded-2xl p-5 space-y-4">
+                    <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>4. Item Specifications (Browse Needs Consistent)</span>
                     </label>
-                    {user?.location && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const { address, postcode, state, country } = user.location;
-                          const formatted = [address, postcode, state, country].filter(Boolean).join(", ");
-                          if (formatted) setReqLocation(formatted);
-                        }}
-                        className="text-[10px] font-mono text-[#82afa6] hover:underline"
-                      >
-                        Use profile location
-                      </button>
-                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {/* Brand */}
+                      <div className="space-y-2">
+                        <label className="text-[11px] font-mono text-[#f4efe5]/70 block">
+                          Brand / Manufacturer:
+                        </label>
+                        <input
+                          type="text"
+                          value={reqBrand}
+                          onChange={(e) => setReqBrand(e.target.value)}
+                          placeholder="e.g. Any brand, Enfamil, Pedigree, Nestlé"
+                          className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-yellow-400"
+                        />
+                        <div className="flex flex-wrap gap-1">
+                          {BRAND_PRESETS.slice(0, 5).map((b) => (
+                            <button
+                              key={b}
+                              type="button"
+                              onClick={() => setReqBrand(b)}
+                              className={`px-2 py-0.5 rounded text-[9px] font-mono border transition-all cursor-pointer ${
+                                reqBrand === b
+                                  ? "bg-yellow-400/20 border-yellow-400 text-yellow-300 font-bold"
+                                  : "bg-white/5 border-white/10 text-[#f4efe5]/60 hover:text-white"
+                              }`}
+                            >
+                              {b}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Colour */}
+                      <div className="space-y-2">
+                        <label className="text-[11px] font-mono text-[#f4efe5]/70 block">
+                          Colour / Variant:
+                        </label>
+                        <input
+                          type="text"
+                          value={reqColor}
+                          onChange={(e) => setReqColor(e.target.value)}
+                          placeholder="e.g. Any, Blue, Red, Multi-colour"
+                          className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-yellow-400"
+                        />
+                        <div className="flex flex-wrap gap-1">
+                          {COLOR_PRESETS.slice(0, 6).map((col) => (
+                            <button
+                              key={col}
+                              type="button"
+                              onClick={() => setReqColor(col)}
+                              className={`px-2 py-0.5 rounded text-[9px] font-mono border transition-all cursor-pointer ${
+                                reqColor === col
+                                  ? "bg-yellow-400/20 border-yellow-400 text-yellow-300 font-bold"
+                                  : "bg-white/5 border-white/10 text-[#f4efe5]/60 hover:text-white"
+                              }`}
+                            >
+                              {col}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
                   </div>
-                  <div className="relative">
-                    <input
-                      type="text"
+
+                  {/* Section 4: Quantity, Unit & Urgency */}
+                  <div className="bg-black/30 border border-white/10 rounded-2xl p-5 space-y-4">
+                    <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>5. Quantity Goal & Urgency Level *</span>
+                    </label>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {/* Quantity */}
+                      <div>
+                        <label className="text-[11px] font-mono text-[#f4efe5]/70 block mb-1">
+                          Quantity Needed:
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          required
+                          value={reqQuantity}
+                          onChange={(e) => setReqQuantity(Math.max(1, parseInt(e.target.value) || 1))}
+                          className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] font-mono focus:outline-none focus:border-yellow-400"
+                        />
+                      </div>
+
+                      {/* Unit */}
+                      <div>
+                        <label className="text-[11px] font-mono text-[#f4efe5]/70 block mb-1">
+                          Unit of Measurement:
+                        </label>
+                        <select
+                          value={reqUnit}
+                          onChange={(e) => setReqUnit(e.target.value)}
+                          className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] font-mono focus:outline-none focus:border-yellow-400 cursor-pointer"
+                        >
+                          {UNIT_OPTIONS.map((u) => (
+                            <option key={u} value={u}>
+                              {u}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Urgency Level Selector */}
+                    <div className="space-y-2 pt-2 border-t border-white/10">
+                      <label className="text-[11px] font-mono text-[#f4efe5]/70 block">
+                        Urgency Priority Level:
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setReqUrgency("standard")}
+                          className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
+                            reqUrgency === "standard"
+                              ? "bg-emerald-950/60 border-emerald-500 text-emerald-300 ring-2 ring-emerald-400/40 shadow-lg"
+                              : "bg-black/40 border-white/10 text-[#f4efe5]/60 hover:text-white"
+                          }`}
+                        >
+                          <div className="text-sm">🌱</div>
+                          <div className="text-[11px] font-mono font-bold mt-1">Standard Aid</div>
+                          <div className="text-[9px] text-[#f4efe5]/50 mt-0.5">Non-critical supplies</div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setReqUrgency("important")}
+                          className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
+                            reqUrgency === "important"
+                              ? "bg-amber-950/60 border-amber-500 text-amber-300 ring-2 ring-amber-400/40 shadow-lg"
+                              : "bg-black/40 border-white/10 text-[#f4efe5]/60 hover:text-white"
+                          }`}
+                        >
+                          <div className="text-sm">⚠️</div>
+                          <div className="text-[11px] font-mono font-bold mt-1">Important Need</div>
+                          <div className="text-[9px] text-[#f4efe5]/50 mt-0.5">Required within week</div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setReqUrgency("emergency")}
+                          className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
+                            reqUrgency === "emergency"
+                              ? "bg-rose-950/60 border-rose-500 text-rose-300 ring-2 ring-rose-400/40 shadow-lg"
+                              : "bg-black/40 border-white/10 text-[#f4efe5]/60 hover:text-white"
+                          }`}
+                        >
+                          <div className="text-sm">🚨</div>
+                          <div className="text-[11px] font-mono font-bold mt-1">Emergency</div>
+                          <div className="text-[9px] text-[#f4efe5]/50 mt-0.5">Immediate 24-48h</div>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Section 5: Delivery Location & Organizer */}
+                  <div className="bg-black/30 border border-white/10 rounded-2xl p-5 space-y-4">
+                    <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5" />
+                      <span>6. Delivery Location & Organizer</span>
+                    </label>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {/* Location */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[11px] font-mono text-[#f4efe5]/70">
+                            Drop-off Location:
+                          </label>
+                          {user?.location && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const { address, postcode, state, country } = user.location;
+                                const formatted = [address, postcode, state, country].filter(Boolean).join(", ");
+                                if (formatted) setReqLocation(formatted);
+                              }}
+                              className="text-[10px] font-mono text-[#82afa6] hover:underline cursor-pointer"
+                            >
+                              Use profile
+                            </button>
+                          )}
+                        </div>
+                        <input
+                          type="text"
+                          required
+                          value={reqLocation}
+                          onChange={(e) => setReqLocation(e.target.value)}
+                          placeholder="e.g. Sibu, Sabah or Kampar, Perak"
+                          className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-yellow-400"
+                        />
+                      </div>
+
+                      {/* Organizer Name */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[11px] font-mono text-[#f4efe5]/70">
+                            Organizer / NGO:
+                          </label>
+                          {user && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setReqOrganizerName(user.charityName || user.username || "Verified NGO Partner");
+                              }}
+                              className="text-[10px] font-mono text-[#82afa6] hover:underline cursor-pointer"
+                            >
+                              Use profile
+                            </button>
+                          )}
+                        </div>
+                        <input
+                          type="text"
+                          value={reqOrganizerName}
+                          onChange={(e) => setReqOrganizerName(e.target.value)}
+                          placeholder={user?.charityName || user?.username || "Hope Community Aid (NGO)"}
+                          className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-yellow-400"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Initial Timeline Update */}
+                    <div className="space-y-1.5 pt-2 border-t border-white/10">
+                      <label className="text-[11px] font-mono text-[#f4efe5]/70 flex items-center justify-between">
+                        <span>Optional Initial Timeline Update Note:</span>
+                        <span className="text-[9px] text-[#f4efe5]/40">Appears in Aid Story</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={reqInitialUpdateNote}
+                        onChange={(e) => setReqInitialUpdateNote(e.target.value)}
+                        placeholder="e.g. Campaign launched; sorting supplies for 45 families."
+                        className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-yellow-400"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Section 6: Item Description */}
+                  <div className="bg-black/30 border border-white/10 rounded-2xl p-5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>7. Item Description & Recipient Context *</span>
+                      </label>
+                      <span className="text-[10px] font-mono text-[#f4efe5]/50">
+                        {reqDesc.length} characters
+                      </span>
+                    </div>
+
+                    <textarea
+                      rows={4}
                       required
-                      value={reqLocation}
-                      onChange={(e) => setReqLocation(e.target.value)}
-                      placeholder="e.g. Kampar Relief Center, Perak"
-                      className="w-full bg-black/40 border border-white/15 rounded-xl pl-9 pr-4 py-2.5 text-xs text-[#f4efe5] focus:outline-none focus:border-yellow-400"
+                      value={reqDesc}
+                      onChange={(e) => setReqDesc(e.target.value)}
+                      placeholder="Describe who will receive these supplies, how they will be delivered, dietary or size constraints, and any additional instructions for donors..."
+                      className="w-full bg-black/50 border border-white/15 rounded-xl p-3.5 text-xs text-[#f4efe5] placeholder-[#f4efe5]/30 focus:outline-none focus:border-yellow-400 leading-relaxed"
                     />
-                    <MapPin className="w-4 h-4 text-[#82afa6] absolute left-3 top-1/2 -translate-y-1/2" />
                   </div>
+
                 </div>
+
               </div>
 
-              {/* 6. OPTIONAL: CAMPAIGN ASSIGNMENT */}
-              {campaigns.length > 0 && (
-                <div className="space-y-1.5 pt-2 border-t border-white/10">
-                  <label className="block text-xs font-mono text-[#82afa6] uppercase tracking-wider flex items-center gap-1.5">
-                    <Layers className="w-3.5 h-3.5" />
-                    <span>Optional: Collect into Existing Campaign</span>
-                  </label>
-                  <select
-                    value={reqSelectedCampaignId}
-                    onChange={(e) => setReqSelectedCampaignId(e.target.value)}
-                    className="w-full bg-black/40 border border-white/15 rounded-xl px-4 py-2.5 text-xs text-[#f4efe5] focus:outline-none focus:border-[#82afa6] cursor-pointer"
-                  >
-                    <option value="">No Campaign (Individual Request)</option>
-                    {campaigns.map((camp) => (
-                      <option key={camp.id} value={camp.id}>
-                        {camp.bannerEmoji || "📦"} {camp.title} ({camp.category})
-                      </option>
-                    ))}
-                  </select>
+              {/* Bottom Submit Action Bar */}
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-6 border-t border-white/10">
+                <div className="text-xs font-mono text-[#f4efe5]/60 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  <span>All inputs will instantly update the public Browse Needs catalog upon submission.</span>
                 </div>
-              )}
 
-              {/* Form Buttons */}
-              <div className="flex items-center justify-end gap-3 pt-4 border-t border-white/10">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("current")}
-                  className="px-5 py-2.5 rounded-full bg-white/5 hover:bg-white/10 text-[#f4efe5] text-xs font-mono transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-8 py-3 bg-yellow-400 hover:bg-yellow-300 text-[#2c221a] font-bold text-sm rounded-full shadow-lg hover:scale-105 active:scale-95 transition-all cursor-pointer flex items-center gap-2"
-                >
-                  <Plus className="w-4 h-4 stroke-[3]" />
-                  <span>Publish Request Now</span>
-                </button>
+                <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("current")}
+                    className="px-5 py-2.5 rounded-full bg-white/5 hover:bg-white/10 text-[#f4efe5] text-xs font-mono transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-8 py-3 bg-yellow-400 hover:bg-yellow-300 text-[#2c221a] font-bold text-sm rounded-full shadow-xl hover:scale-105 active:scale-95 transition-all cursor-pointer flex items-center gap-2"
+                  >
+                    <Plus className="w-4 h-4 stroke-[3]" />
+                    <span>Publish Request Now</span>
+                  </button>
+                </div>
               </div>
 
             </form>
@@ -1880,7 +2642,7 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
               </button>
             </div>
 
-            {campaigns.length === 0 ? (
+            {userCampaigns.length === 0 ? (
               <div className="p-12 text-center bg-[#25201a]/60 rounded-3xl border border-white/10 space-y-4">
                 <div className="w-16 h-16 rounded-full bg-purple-500/10 text-purple-400 flex items-center justify-center mx-auto text-3xl">
                   📁
@@ -1898,7 +2660,7 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
               </div>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {campaigns.map((camp) => {
+                {userCampaigns.map((camp) => {
                   const associatedRequests = requests.filter((r) => camp.requestIds.includes(r.id));
                   const totalNeeded = associatedRequests.reduce((acc, curr) => acc + curr.quantity, 0);
                   const totalPledged = associatedRequests.reduce((acc, curr) => acc + curr.pledgedQuantity, 0);
@@ -2157,7 +2919,8 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
                       type="text"
                       required
                       value={campTitle}
-                      onChange={(e) => setCampTitle(e.target.value)}
+                      onChange={(e) => setCampTitle(formatCapitalizedTitle(e.target.value))}
+                      onBlur={(e) => setCampTitle(formatCapitalizedTitle(e.target.value.trim()))}
                       placeholder="e.g. Kampar Flood Relief Drive 2026"
                       className="w-full bg-black/40 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-purple-400"
                     />
@@ -2378,306 +3141,541 @@ export default function AppYourRequest({ navigateToView }: AppYourRequestProps) 
         )}
       </AnimatePresence>
 
-      {/* EDIT REQUEST DETAILS MODAL */}
+      {/* EDIT REQUEST DETAILS MODAL (HORIZONTAL LAYOUT WITH UPDATES FIELD) */}
       <AnimatePresence>
         {editingRequest && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-5 md:p-6 overflow-hidden">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setEditingRequest(null)}
-              className="absolute inset-0 bg-black/75 backdrop-blur-sm"
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
             />
 
             <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="relative w-full max-w-lg bg-[#2a231d] rounded-3xl border border-white/20 p-6 sm:p-8 shadow-2xl z-10 space-y-4 text-left"
+              initial={{ opacity: 0, scale: 0.96, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 10 }}
+              className="relative w-full max-w-5xl xl:max-w-6xl max-h-[92vh] flex flex-col bg-[#241e19] rounded-3xl border border-white/20 shadow-2xl z-10 text-left overflow-hidden"
             >
-              <div className="flex justify-between items-center border-b border-white/10 pb-3">
-                <h3 className="font-serif text-lg font-bold text-[#f4efe5]">
-                  Edit Request Details
-                </h3>
-                <button onClick={() => setEditingRequest(null)} className="text-white/50 hover:text-white">
+              {/* MODAL HEADER */}
+              <div className="flex items-center justify-between px-6 sm:px-8 py-4 border-b border-white/10 shrink-0 bg-[#2b231d]">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-serif text-xl sm:text-2xl font-bold text-[#f4efe5]">
+                      Edit Request Details
+                    </h3>
+                    <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full bg-yellow-400/20 text-yellow-300 border border-yellow-400/30">
+                      ID: #{editingRequest.id.slice(-6)}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#f4efe5]/60 mt-0.5">
+                    Update item details, photos & post real-time updates for donors to follow.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingRequest(null)}
+                  className="w-9 h-9 rounded-full bg-black/30 hover:bg-black/60 text-white/70 hover:text-white flex items-center justify-center transition-colors cursor-pointer border border-white/10"
+                  title="Close"
+                >
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
-              <form onSubmit={handleSaveEditRequest} className="space-y-3.5 text-xs max-h-[75vh] overflow-y-auto pr-1">
-                <div>
-                  <label className="font-mono text-[#f4efe5]/60 uppercase text-[10px]">Item Title *</label>
-                  <input
-                    type="text"
-                    required
-                    value={editingRequest.title}
-                    onChange={(e) => setEditingRequest({ ...editingRequest, title: e.target.value })}
-                    className="w-full bg-black/40 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] mt-1 focus:outline-none focus:border-yellow-400"
-                  />
-                </div>
-
-                {/* Multi-category tags */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="font-mono text-yellow-400 uppercase text-[10px] tracking-wider">
-                      Categories / Labels (Multiple Selectable) *
-                    </label>
-                    <span className="text-[10px] font-mono text-[#f4efe5]/50">
-                      {editReqCategories.length} selected
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                    {STANDARD_CATEGORIES.map((cat) => {
-                      const isSelected = editReqCategories.includes(cat);
-                      const style = CATEGORY_COLORS[cat] || CATEGORY_COLORS.Others;
-                      return (
-                        <button
-                          key={cat}
-                          type="button"
-                          onClick={() => {
-                            if (isSelected) {
-                              if (editReqCategories.length > 1) {
-                                setEditReqCategories(editReqCategories.filter((c) => c !== cat));
-                              } else {
-                                setEditReqCategories([]);
-                              }
-                            } else {
-                              setEditReqCategories([...editReqCategories, cat]);
-                            }
-                          }}
-                          className={`p-2 rounded-lg border text-[11px] font-mono font-bold flex items-center justify-between transition-all cursor-pointer ${
-                            isSelected
-                              ? `${style.bg} ${style.text} ${style.border} ring-1 ring-yellow-400/50 shadow`
-                              : "bg-black/30 border-white/10 text-[#f4efe5]/60 hover:bg-black/50 hover:text-white"
-                          }`}
-                        >
-                          <span>{cat}</span>
-                          {isSelected && <Check className="w-3 h-3 text-yellow-400 shrink-0 ml-1" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/* Custom tag input for Edit Modal */}
-                  <AnimatePresence>
-                    {editReqCategories.includes("Others") && (
-                      <motion.div
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: "auto" }}
-                        exit={{ opacity: 0, height: 0 }}
-                        className="overflow-hidden pt-1"
-                      >
-                        <div className="bg-stone-900/90 border border-amber-400/40 rounded-xl p-3 space-y-1.5">
-                          <label className="text-[10px] font-mono text-amber-300 font-bold flex items-center gap-1.5">
-                            <Tag className="w-3 h-3" />
-                            <span>Custom Label(s) (comma-separated)</span>
-                          </label>
-                          <input
-                            type="text"
-                            value={editReqCustomCategory}
-                            onChange={(e) => setEditReqCustomCategory(e.target.value)}
-                            placeholder="e.g. Baby Formula, Clean Water Filters, Diapers"
-                            className="w-full bg-black/60 border border-white/20 rounded-lg px-3 py-1.5 text-xs text-[#f4efe5] placeholder-[#f4efe5]/40 focus:outline-none focus:border-amber-400"
-                          />
-                        </div>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-
-                {/* MULTI-IMAGE MANAGEMENT IN EDIT MODAL */}
-                <div className="space-y-2.5 pt-1 border-t border-white/10">
-                  <div className="flex items-center justify-between">
-                    <label className="font-mono text-yellow-400 uppercase text-[10px] tracking-wider flex items-center gap-1.5">
-                      <Images className="w-3.5 h-3.5" />
-                      <span>Item Photos ({editReqImages.length})</span>
-                    </label>
-                    <label className="text-[10px] font-mono text-yellow-300 hover:underline cursor-pointer flex items-center gap-1">
-                      <Plus className="w-3 h-3" />
-                      <span>Add Photos</span>
+              {/* MODAL BODY (HORIZONTAL 2-COLUMN GRID) */}
+              <form onSubmit={handleSaveEditRequest} className="flex-1 overflow-y-auto p-5 sm:p-7 space-y-6">
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-start">
+                  
+                  {/* LEFT COLUMN: TITLE, CATEGORIES, PHOTOS & STORY (6 Cols) */}
+                  <div className="lg:col-span-6 space-y-5">
+                    
+                    {/* Item Title */}
+                    <div className="bg-black/30 border border-white/10 rounded-2xl p-4 sm:p-5 space-y-2">
+                      <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                        <FileText className="w-3.5 h-3.5" />
+                        <span>Item Title *</span>
+                      </label>
                       <input
-                        type="file"
-                        multiple
-                        accept="image/*"
-                        className="hidden"
-                        onChange={(e) => {
-                          if (e.target.files && e.target.files.length > 0) {
-                            handleEditMultipleImageFiles(e.target.files);
-                            e.target.value = "";
-                          }
-                        }}
+                        type="text"
+                        required
+                        value={editingRequest.title}
+                        onChange={(e) => setEditingRequest({ ...editingRequest, title: formatCapitalizedTitle(e.target.value) })}
+                        onBlur={(e) => editingRequest && setEditingRequest({ ...editingRequest, title: formatCapitalizedTitle(e.target.value.trim()) })}
+                        placeholder="e.g. Baby Pampers (Size M)"
+                        className="w-full bg-black/50 border border-white/15 rounded-xl px-4 py-2.5 text-sm text-[#f4efe5] focus:outline-none focus:border-yellow-400 font-medium"
                       />
-                    </label>
-                  </div>
+                    </div>
 
-                  {editReqImages.length > 0 ? (
-                    <div className="space-y-2">
-                      <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
-                        {editReqImages.map((imgUrl, idx) => {
-                          const isPrimary = idx === editPrimaryImageIndex;
+                    {/* Multi-category tags */}
+                    <div className="bg-black/30 border border-white/10 rounded-2xl p-4 sm:p-5 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                          <Tag className="w-3.5 h-3.5" />
+                          <span>Categories / Labels *</span>
+                        </label>
+                        <span className="text-[10px] font-mono text-[#f4efe5]/50">
+                          {editReqCategories.length} selected
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                        {STANDARD_CATEGORIES.map((cat) => {
+                          const isSelected = editReqCategories.includes(cat);
+                          const style = CATEGORY_COLORS[cat] || CATEGORY_COLORS.Others;
                           return (
-                            <div
-                              key={idx}
-                              onClick={() => setEditPrimaryImageIndex(idx)}
-                              className={`group relative h-16 rounded-xl overflow-hidden border-2 transition-all cursor-pointer ${
-                                isPrimary
-                                  ? "border-yellow-400 ring-2 ring-yellow-400/40 scale-105 shadow"
-                                  : "border-white/10 hover:border-white/40 opacity-80 hover:opacity-100"
+                            <button
+                              key={cat}
+                              type="button"
+                              onClick={() => {
+                                if (isSelected) {
+                                  if (editReqCategories.length > 1) {
+                                    setEditReqCategories(editReqCategories.filter((c) => c !== cat));
+                                  } else {
+                                    setEditReqCategories([]);
+                                  }
+                                } else {
+                                  setEditReqCategories([...editReqCategories, cat]);
+                                }
+                              }}
+                              className={`p-2 rounded-xl border text-[11px] font-mono font-bold flex items-center justify-between transition-all cursor-pointer ${
+                                isSelected
+                                  ? `${style.bg} ${style.text} ${style.border} ring-1 ring-yellow-400/50 shadow`
+                                  : "bg-black/40 border-white/10 text-[#f4efe5]/60 hover:bg-black/60 hover:text-white"
                               }`}
                             >
-                              <img
-                                src={imgUrl}
-                                alt={`Edit Photo ${idx + 1}`}
-                                className="w-full h-full object-cover"
-                                referrerPolicy="no-referrer"
-                              />
-                              <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-white px-1 rounded">
-                                #{idx + 1}
-                              </span>
-                              {isPrimary && (
-                                <span className="absolute top-0.5 right-0.5 bg-yellow-400 text-black p-0.5 rounded-full">
-                                  <Star className="w-2 h-2 fill-current" />
-                                </span>
-                              )}
-                              <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1">
-                                {!isPrimary && (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setEditPrimaryImageIndex(idx);
-                                    }}
-                                    title="Set Cover"
-                                    className="p-1 rounded-full bg-yellow-400 text-black"
-                                  >
-                                    <Star className="w-2.5 h-2.5 fill-current" />
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleRemoveEditImage(idx);
-                                  }}
-                                  title="Remove"
-                                  className="p-1 rounded-full bg-rose-600 text-white"
-                                >
-                                  <Trash2 className="w-2.5 h-2.5" />
-                                </button>
-                              </div>
-                            </div>
+                              <span>{cat}</span>
+                              {isSelected && <Check className="w-3 h-3 text-yellow-400 shrink-0 ml-1" />}
+                            </button>
                           );
                         })}
                       </div>
-                      <p className="text-[10px] font-mono text-[#f4efe5]/50">
-                        Click a thumbnail to set as primary cover photo, or upload additional photos.
-                      </p>
+
+                      {/* Custom tag input */}
+                      <AnimatePresence>
+                        {editReqCategories.includes("Others") && (
+                          <motion.div
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: "auto" }}
+                            exit={{ opacity: 0, height: 0 }}
+                            className="overflow-hidden pt-1"
+                          >
+                            <div className="bg-stone-900/90 border border-amber-400/40 rounded-xl p-3 space-y-1.5">
+                              <label className="text-[10px] font-mono text-amber-300 font-bold flex items-center gap-1.5">
+                                <Tag className="w-3 h-3" />
+                                <span>Custom Label(s) (comma-separated)</span>
+                              </label>
+                              <input
+                                type="text"
+                                value={editReqCustomCategory}
+                                onChange={(e) => setEditReqCustomCategory(e.target.value)}
+                                placeholder="e.g. Baby Formula, Clean Water Filters, Diapers"
+                                className="w-full bg-black/60 border border-white/20 rounded-lg px-3 py-1.5 text-xs text-[#f4efe5] placeholder-[#f4efe5]/40 focus:outline-none focus:border-amber-400"
+                              />
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
-                  ) : (
-                    <div className="p-3 text-center border border-dashed border-white/20 rounded-xl bg-black/20">
-                      <p className="text-[11px] text-[#f4efe5]/60">No photos attached to this request.</p>
-                      <label className="text-xs text-yellow-400 font-bold hover:underline cursor-pointer inline-block mt-1">
-                        + Browse and attach photos
-                        <input
-                          type="file"
-                          multiple
-                          accept="image/*"
-                          className="hidden"
-                          onChange={(e) => {
-                            if (e.target.files && e.target.files.length > 0) {
-                              handleEditMultipleImageFiles(e.target.files);
-                              e.target.value = "";
-                            }
-                          }}
-                        />
+
+                    {/* Photos Management */}
+                    <div className="bg-black/30 border border-white/10 rounded-2xl p-4 sm:p-5 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                          <Images className="w-3.5 h-3.5" />
+                          <span>Item Photos ({editReqImages.length})</span>
+                        </label>
+                        <label className="text-xs font-mono text-yellow-300 hover:text-yellow-200 cursor-pointer flex items-center gap-1">
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Add Photos</span>
+                          <input
+                            type="file"
+                            multiple
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              if (e.target.files && e.target.files.length > 0) {
+                                handleEditMultipleImageFiles(e.target.files);
+                                e.target.value = "";
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+
+                      {editReqImages.length > 0 ? (
+                        <div className="space-y-2">
+                          <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5">
+                            {editReqImages.map((imgUrl, idx) => {
+                              const isPrimary = idx === editPrimaryImageIndex;
+                              return (
+                                <div
+                                  key={idx}
+                                  onClick={() => setEditPrimaryImageIndex(idx)}
+                                  className={`group relative h-20 rounded-xl overflow-hidden border-2 transition-all cursor-pointer ${
+                                    isPrimary
+                                      ? "border-yellow-400 ring-2 ring-yellow-400/40 shadow-lg"
+                                      : "border-white/10 hover:border-white/40 opacity-80 hover:opacity-100"
+                                  }`}
+                                >
+                                  <img
+                                    src={imgUrl}
+                                    alt={`Photo ${idx + 1}`}
+                                    className="w-full h-full object-cover"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                  <span className="absolute top-1 left-1 bg-black/80 text-[9px] font-mono text-white px-1.5 py-0.2 rounded">
+                                    #{idx + 1}
+                                  </span>
+                                  {isPrimary && (
+                                    <span className="absolute top-1 right-1 bg-yellow-400 text-black p-0.5 rounded-full shadow">
+                                      <Star className="w-2.5 h-2.5 fill-current" />
+                                    </span>
+                                  )}
+                                  <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1.5">
+                                    {!isPrimary && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setEditPrimaryImageIndex(idx);
+                                        }}
+                                        title="Set as Cover Photo"
+                                        className="p-1 rounded-full bg-yellow-400 text-black hover:scale-110 transition-transform"
+                                      >
+                                        <Star className="w-3 h-3 fill-current" />
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleRemoveEditImage(idx);
+                                      }}
+                                      title="Remove Photo"
+                                      className="p-1 rounded-full bg-rose-600 text-white hover:scale-110 transition-transform"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <p className="text-[10px] font-mono text-[#f4efe5]/50">
+                            Click thumbnail to select primary cover photo. Hover to remove.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="p-4 text-center border border-dashed border-white/20 rounded-xl bg-black/20 space-y-1">
+                          <p className="text-xs text-[#f4efe5]/60">No photos attached.</p>
+                          <label className="text-xs text-yellow-400 font-bold hover:underline cursor-pointer inline-block">
+                            + Browse and upload photos
+                            <input
+                              type="file"
+                              multiple
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => {
+                                if (e.target.files && e.target.files.length > 0) {
+                                  handleEditMultipleImageFiles(e.target.files);
+                                  e.target.value = "";
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                      )}
+
+                      {/* Presets */}
+                      <div className="pt-1">
+                        <span className="text-[9px] font-mono text-[#f4efe5]/40 block mb-1">
+                          Quick Add Common Aid Images:
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {SAMPLE_PRESET_IMAGES.slice(0, 5).map((p, pIdx) => (
+                            <button
+                              key={pIdx}
+                              type="button"
+                              onClick={() => {
+                                if (!editReqImages.includes(p.url)) {
+                                  setEditReqImages((prev) => [...prev, p.url]);
+                                }
+                              }}
+                              className="px-2 py-0.5 rounded-md bg-white/5 hover:bg-white/15 text-[10px] font-mono text-[#f4efe5]/70 border border-white/10 flex items-center gap-1 cursor-pointer"
+                            >
+                              <Plus className="w-2.5 h-2.5 text-yellow-400" />
+                              <span>{p.label.split(" ")[0]}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Description */}
+                    <div className="bg-black/30 border border-white/10 rounded-2xl p-4 sm:p-5 space-y-2">
+                      <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>Description & Recipient Story</span>
                       </label>
+                      <textarea
+                        rows={3}
+                        value={editingRequest.description}
+                        onChange={(e) => setEditingRequest({ ...editingRequest, description: e.target.value })}
+                        placeholder="Explain who needs these supplies and any specific guidelines..."
+                        className="w-full bg-black/50 border border-white/15 rounded-xl p-3 text-xs text-[#f4efe5] placeholder-[#f4efe5]/30 focus:outline-none focus:border-yellow-400 leading-relaxed"
+                      />
                     </div>
-                  )}
 
-                  {/* Presets in Edit Modal */}
-                  <div className="pt-1">
-                    <span className="text-[9px] font-mono text-[#f4efe5]/40 block mb-1">
-                      Quick Add Common Aid Images:
-                    </span>
-                    <div className="flex flex-wrap gap-1">
-                      {SAMPLE_PRESET_IMAGES.slice(0, 4).map((p, pIdx) => (
-                        <button
-                          key={pIdx}
-                          type="button"
-                          onClick={() => {
-                            if (!editReqImages.includes(p.url)) {
-                              setEditReqImages((prev) => [...prev, p.url]);
-                            }
-                          }}
-                          className="px-2 py-1 rounded-md bg-white/5 hover:bg-white/15 text-[10px] font-mono text-[#f4efe5]/70 border border-white/10 flex items-center gap-1 cursor-pointer"
-                        >
-                          <Plus className="w-2.5 h-2.5 text-yellow-400" />
-                          <span>{p.label.split(" ")[0]}</span>
-                        </button>
-                      ))}
+                  </div>
+
+                  {/* RIGHT COLUMN: QUANTITY, LOGISTICS, AND UPDATES FOR DONORS (6 Cols) */}
+                  <div className="lg:col-span-6 space-y-5">
+                    
+                    {/* Quantity & Unit & Logistics */}
+                    <div className="bg-black/30 border border-white/10 rounded-2xl p-4 sm:p-5 space-y-3.5">
+                      <label className="text-xs font-mono text-yellow-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                        <Package className="w-3.5 h-3.5" />
+                        <span>Quantity & Logistics</span>
+                      </label>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="font-mono text-[#f4efe5]/60 uppercase text-[10px] block mb-1">Quantity Needed</label>
+                          <input
+                            type="number"
+                            min="1"
+                            required
+                            value={editingRequest.quantity}
+                            onChange={(e) => setEditingRequest({ ...editingRequest, quantity: parseInt(e.target.value) || 1 })}
+                            className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] font-mono focus:outline-none focus:border-yellow-400"
+                          />
+                        </div>
+                        <div>
+                          <label className="font-mono text-[#f4efe5]/60 uppercase text-[10px] block mb-1">Unit</label>
+                          <input
+                            type="text"
+                            value={editingRequest.unit}
+                            onChange={(e) => setEditingRequest({ ...editingRequest, unit: e.target.value })}
+                            className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] font-mono focus:outline-none focus:border-yellow-400"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Urgency */}
+                      <div className="space-y-1.5 pt-1">
+                        <label className="font-mono text-[#f4efe5]/60 uppercase text-[10px] block">Urgency Priority</label>
+                        <div className="grid grid-cols-3 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditReqUrgency("standard")}
+                            className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                              editReqUrgency === "standard"
+                                ? "bg-emerald-950/60 border-emerald-500 text-emerald-300 ring-1 ring-emerald-400 shadow"
+                                : "bg-black/40 border-white/10 text-[#f4efe5]/60 hover:text-white"
+                            }`}
+                          >
+                            <span className="text-xs">🌱 Standard</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditReqUrgency("important")}
+                            className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                              editReqUrgency === "important"
+                                ? "bg-amber-950/60 border-amber-500 text-amber-300 ring-1 ring-amber-400 shadow"
+                                : "bg-black/40 border-white/10 text-[#f4efe5]/60 hover:text-white"
+                            }`}
+                          >
+                            <span className="text-xs">⚠️ Important</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditReqUrgency("emergency")}
+                            className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                              editReqUrgency === "emergency"
+                                ? "bg-rose-950/60 border-rose-500 text-rose-300 ring-1 ring-rose-400 shadow"
+                                : "bg-black/40 border-white/10 text-[#f4efe5]/60 hover:text-white"
+                            }`}
+                          >
+                            <span className="text-xs">🚨 Emergency</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Location & Brand */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                        <div>
+                          <label className="font-mono text-[#f4efe5]/60 uppercase text-[10px] block mb-1">Drop-off Location</label>
+                          <input
+                            type="text"
+                            value={editingRequest.location}
+                            onChange={(e) => setEditingRequest({ ...editingRequest, location: e.target.value })}
+                            className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-yellow-400"
+                          />
+                        </div>
+                        <div>
+                          <label className="font-mono text-[#f4efe5]/60 uppercase text-[10px] block mb-1">Brand Preference</label>
+                          <input
+                            type="text"
+                            value={editReqBrand}
+                            onChange={(e) => setEditReqBrand(e.target.value)}
+                            placeholder="Any brand"
+                            className="w-full bg-black/50 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-yellow-400"
+                          />
+                        </div>
+                      </div>
                     </div>
+
+                    {/* 🌟 UPDATES FOR DONORS (TIMELINE FIELD) */}
+                    <div className="bg-gradient-to-br from-[#2f241a] to-[#201a14] border border-amber-500/30 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl">
+                      <div className="flex items-center justify-between border-b border-white/10 pb-3">
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <label className="text-xs font-mono text-amber-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                              <Sparkles className="w-3.5 h-3.5" />
+                              <span>Updates for Donors (Timeline)</span>
+                            </label>
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30">
+                              {editReqUpdates.length} posted
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-[#f4efe5]/70">
+                            Provide the newest information and progress updates so donors can follow live.
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Add New Update Input Box */}
+                      <div className="bg-black/40 border border-white/10 rounded-xl p-3.5 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-mono text-yellow-300 font-bold uppercase flex items-center gap-1">
+                            <Plus className="w-3 h-3" />
+                            <span>New Status Update</span>
+                          </span>
+                          <div className="flex items-center gap-1 text-[10px] font-mono text-[#f4efe5]/60">
+                            <Calendar className="w-3 h-3 text-yellow-400" />
+                            <input
+                              type="text"
+                              value={newUpdateDate}
+                              onChange={(e) => setNewUpdateDate(e.target.value)}
+                              placeholder="D/M/YYYY"
+                              className="bg-black/60 border border-white/20 rounded px-2 py-0.5 text-[10px] text-white w-24 font-mono text-center focus:outline-none focus:border-yellow-400"
+                              title="Update date"
+                            />
+                          </div>
+                        </div>
+
+                        <textarea
+                          rows={2}
+                          value={newUpdateText}
+                          onChange={(e) => setNewUpdateText(e.target.value)}
+                          placeholder="e.g. Currently, we receive some calls and pledges for these essentials. Thanks for all donor support!"
+                          className="w-full bg-black/60 border border-white/15 rounded-lg p-2.5 text-xs text-[#f4efe5] placeholder-[#f4efe5]/30 focus:outline-none focus:border-yellow-400 leading-relaxed"
+                        />
+
+                        {/* Quick Presets */}
+                        <div className="space-y-1">
+                          <span className="text-[9px] font-mono text-[#f4efe5]/40 block">
+                            Quick Update Templates:
+                          </span>
+                          <div className="flex flex-wrap gap-1">
+                            {UPDATE_PRESET_TEMPLATES.map((tmpl, tIdx) => (
+                              <button
+                                key={tIdx}
+                                type="button"
+                                onClick={() => handleApplyUpdatePreset(tmpl)}
+                                className="text-[9px] font-mono text-left px-2 py-1 rounded bg-white/5 hover:bg-white/15 text-[#f4efe5]/70 border border-white/10 truncate max-w-[240px] cursor-pointer"
+                                title={tmpl}
+                              >
+                                {tmpl}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="flex justify-end pt-1">
+                          <button
+                            type="button"
+                            onClick={handleAddNewUpdate}
+                            className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs rounded-full shadow transition-transform active:scale-95 flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                            <span>Add Update to Timeline</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Timeline Preview of Updates (Matching Image 2 Style) */}
+                      <div className="space-y-2">
+                        <span className="text-[10px] font-mono text-[#f4efe5]/60 uppercase tracking-wider block">
+                          Timeline Preview (Live Donor View):
+                        </span>
+
+                        {editReqUpdates.length === 0 ? (
+                          <div className="p-4 text-center rounded-xl bg-black/20 border border-dashed border-white/10">
+                            <p className="text-xs text-[#f4efe5]/50 italic">
+                              No updates posted yet. Add a status update above to keep donors informed.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="relative pl-6 space-y-3 before:absolute before:left-2 before:top-2 before:bottom-2 before:w-0.5 before:bg-[#f97316] max-h-48 overflow-y-auto pr-1">
+                            {editReqUpdates.map((up) => (
+                              <div key={up.id} className="relative group bg-black/20 p-2.5 rounded-xl border border-white/5 space-y-1">
+                                {/* Node Dot */}
+                                <div className="absolute -left-6 top-2.5 w-3.5 h-3.5 rounded-full bg-[#facc15] border-2 border-[#241e19] shadow" />
+
+                                <div className="flex items-center justify-between">
+                                  <div className="text-[11px] font-mono font-bold text-white">
+                                    {up.date}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveEditUpdate(up.id)}
+                                    title="Delete update"
+                                    className="text-white/40 hover:text-rose-400 p-1 transition-colors cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
+
+                                <p className="text-xs text-[#f4efe5]/80 leading-relaxed font-sans">
+                                  {up.text}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                    </div>
+
+                  </div>
+
+                </div>
+
+                {/* MODAL BOTTOM ACTION BAR */}
+                <div className="flex items-center justify-between pt-4 border-t border-white/10">
+                  <span className="text-xs font-mono text-[#f4efe5]/50 hidden sm:inline">
+                    Changes will take effect immediately upon saving.
+                  </span>
+                  <div className="flex items-center gap-3 ml-auto">
+                    <button
+                      type="button"
+                      onClick={() => setEditingRequest(null)}
+                      className="px-5 py-2.5 rounded-full bg-white/5 hover:bg-white/10 text-xs font-mono text-[#f4efe5] cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-7 py-2.5 bg-yellow-400 hover:bg-yellow-300 text-[#2c221a] font-bold text-xs rounded-full shadow-lg hover:scale-105 active:scale-95 transition-all flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Check className="w-4 h-4 stroke-[3]" />
+                      <span>Save Changes</span>
+                    </button>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="font-mono text-[#f4efe5]/60 uppercase text-[10px]">Quantity</label>
-                    <input
-                      type="number"
-                      min="1"
-                      required
-                      value={editingRequest.quantity}
-                      onChange={(e) => setEditingRequest({ ...editingRequest, quantity: parseInt(e.target.value) || 1 })}
-                      className="w-full bg-black/40 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] mt-1"
-                    />
-                  </div>
-                  <div>
-                    <label className="font-mono text-[#f4efe5]/60 uppercase text-[10px]">Unit</label>
-                    <input
-                      type="text"
-                      value={editingRequest.unit}
-                      onChange={(e) => setEditingRequest({ ...editingRequest, unit: e.target.value })}
-                      className="w-full bg-black/40 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] mt-1"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="font-mono text-[#f4efe5]/60 uppercase text-[10px]">Location</label>
-                  <input
-                    type="text"
-                    value={editingRequest.location}
-                    onChange={(e) => setEditingRequest({ ...editingRequest, location: e.target.value })}
-                    className="w-full bg-black/40 border border-white/15 rounded-xl px-3.5 py-2 text-xs text-[#f4efe5] mt-1"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-mono text-[#f4efe5]/60 uppercase text-[10px]">Description</label>
-                  <textarea
-                    rows={3}
-                    value={editingRequest.description}
-                    onChange={(e) => setEditingRequest({ ...editingRequest, description: e.target.value })}
-                    className="w-full bg-black/40 border border-white/15 rounded-xl p-3 text-xs text-[#f4efe5] mt-1"
-                  />
-                </div>
-
-                <div className="flex items-center justify-end gap-2 pt-3 border-t border-white/10">
-                  <button
-                    type="button"
-                    onClick={() => setEditingRequest(null)}
-                    className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 text-xs font-mono"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="px-5 py-2 bg-yellow-400 hover:bg-yellow-300 text-[#2c221a] font-bold text-xs rounded-full shadow cursor-pointer"
-                  >
-                    Save Changes
-                  </button>
-                </div>
               </form>
             </motion.div>
           </div>

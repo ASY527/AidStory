@@ -39,11 +39,39 @@ import {
   Check,
   Settings as SettingsIcon,
   Sliders,
-  Volume2
+  Volume2,
+  Camera,
+  Edit3,
+  Save,
+  Users,
+  Instagram,
+  Facebook,
+  Globe,
+  ShieldCheck,
+  Clock
 } from "lucide-react";
 import { RequestDetailModal } from "./RequestDetailModal";
 import { DEFAULT_NEEDS_REQUESTS } from "./AppNeeds";
 import { RecipientRequest } from "../types";
+import { SEED_USERS } from "../data/seedDatabase";
+import {
+  saveUserToCloud,
+  saveSubscriptionsToCloud,
+  saveUserDonationToCloud,
+  subscribeToAllUserDonations
+} from "../lib/cloudService";
+import { auth } from "../lib/firebase";
+import { signOut } from "firebase/auth";
+import picnicMainMenuArt from "../assets/images/aidstory-picnic-main-menu.png";
+import mobilePicnicMainMenuArt from "../assets/images/aidstory-picnic-main-menu-mobile.png";
+import picnicToyCarArt from "../assets/images/picnic-menu-toy-car.png";
+import picnicBrowseNeedsArt from "../assets/images/picnic-menu-browse-needs.png";
+import picnicCameraArt from "../assets/images/picnic-menu-camera.png";
+import picnicNotebookArt from "../assets/images/picnic-menu-notebook.png";
+import picnicCommentsNoteArt from "../assets/images/picnic-menu-comments-note.png";
+import picnicFlowerBasketArt from "../assets/images/picnic-menu-flower-basket.png";
+import picnicFramedSceneArt from "../assets/images/picnic-menu-framed-scene.png";
+import picnicDonationBasketArt from "../assets/images/picnic-menu-donation-basket.png";
 
 // Verified NGOs and Requesters for member subscriptions
 export const ALL_VERIFIED_REQUESTERS = [
@@ -113,6 +141,18 @@ export const ALL_VERIFIED_REQUESTERS = [
   }
 ];
 
+// Interactive mock subscribers / followers list for NGO/Charity profile viewer
+export const MOCK_PROFILE_SUBSCRIBERS = [
+  { id: "sub-1", name: "Sarah Tan", role: "Monthly In-Kind Donor", location: "Kuala Lumpur", joined: "2 days ago", avatar: "👩" },
+  { id: "sub-2", name: "David Wong", role: "Verified Volunteer Driver", location: "Petaling Jaya", joined: "5 days ago", avatar: "👨" },
+  { id: "sub-3", name: "Bangsar Care Volunteers", role: "Community Partner", location: "Bangsar, KL", joined: "1 week ago", avatar: "🤝" },
+  { id: "sub-4", name: "Siti Rahmah", role: "Essential Goods Contributor", location: "Shah Alam", joined: "2 weeks ago", avatar: "🧕" },
+  { id: "sub-5", name: "Khoo Wei Kang", role: "Logistics Supporter", location: "Ipoh, Perak", joined: "3 weeks ago", avatar: "🚚" },
+  { id: "sub-6", name: "Dr. Alicia Lim", role: "Medical Aid Sponsor", location: "Subang Jaya", joined: "1 month ago", avatar: "🩺" },
+  { id: "sub-7", name: "WeAreCharity Community", role: "Regional Partner", location: "Penang", joined: "1 month ago", avatar: "💚" },
+  { id: "sub-8", name: "Lucas Fernandez", role: "Emergency Relief Volunteer", location: "Johor Bahru", joined: "2 months ago", avatar: "🙋‍♂️" }
+];
+
 // Whimsical floating storybook graphics for donation categories
 const FLOATING_BACKGROUND_ITEMS = [
   // Toys & Fun items
@@ -147,12 +187,13 @@ const FLOATING_BACKGROUND_ITEMS = [
 ];
 
 interface AppMainMenuProps {
-  navigateToView: (view: "home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box") => void;
+  navigateToView: (view: "home" | "comments" | "explore" | "main_menu" | "your_request" | "needs" | "preparing_donate_box" | "delivery_status") => void;
 }
 
 export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
   const [user, setUser] = useState<any>(null);
   const [isFlipped, setIsFlipped] = useState(false);
+  const [isFutureEnhancementsOpen, setIsFutureEnhancementsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<string | null>(() => {
     if (typeof window !== "undefined") {
       if (window.location.hash === "#donate-box") return "donate";
@@ -259,15 +300,17 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
     }
   }, []);
 
-  // Helper to calculate days of journey from the joined day until the current day
+  // Guest sessions are not persisted, so their journey always begins on day 1.
   const getDaysOfJourney = (): number => {
-    if (!user) {
-      return 100; // Sample for guest explorer preview
+    let joinedDateStr: string | null = null;
+    if (user && user.joinedDate) {
+      joinedDateStr = user.joinedDate;
     }
-    if (!user.joinedDate) {
+
+    if (!joinedDateStr) {
       return 1;
     }
-    const joined = new Date(user.joinedDate);
+    const joined = new Date(joinedDateStr);
     if (isNaN(joined.getTime())) {
       return 1;
     }
@@ -293,18 +336,235 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
     )
   );
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.warn("Firebase sign out failed:", error);
+    }
     localStorage.removeItem("aidstory_current_user");
     navigateToView("home");
   };
 
   const getFormattedLocation = () => {
     if (!user || !user.location) {
-      return "unknown";
+      return "-";
     }
     const { address, postcode, state, country } = user.location;
     const parts = [address, postcode, state, country].filter(Boolean);
-    return parts.length > 0 ? parts.join(", ") : "unknown";
+    return parts.length > 0 ? parts.join(", ") : "-";
+  };
+
+  // Profile Management State & Handlers
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [showSubscribersModal, setShowSubscribersModal] = useState(false);
+  const [subscribersSearchQuery, setSubscribersSearchQuery] = useState("");
+  const [profileToast, setProfileToast] = useState("");
+
+  const [editUsername, setEditUsername] = useState("");
+  const [editEmail, setEditEmail] = useState("");
+  const [editContactPrefix, setEditContactPrefix] = useState("+60");
+  const [editContactNumber, setEditContactNumber] = useState("");
+  const [editAddress, setEditAddress] = useState("");
+  const [editPostcode, setEditPostcode] = useState("");
+  const [editState, setEditState] = useState("");
+  const [editCountry, setEditCountry] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editInstagram, setEditInstagram] = useState("");
+  const [editFacebook, setEditFacebook] = useState("");
+  const [editRoleType, setEditRoleType] = useState("AIDSTORY COMMUNITY DISPATCHER");
+  const [editAvatarUrl, setEditAvatarUrl] = useState("");
+
+  const handleStartEditingProfile = () => {
+    setEditUsername(user?.username || "NGO01");
+    setEditEmail(user?.email || "ngo1@gmail.com");
+    const fullContact = user?.contact || "+60 33-7894561";
+    const parts = fullContact.split(" ");
+    if (parts.length > 1) {
+      setEditContactPrefix(parts[0].replace(/[^\d+]/g, ""));
+      setEditContactNumber(parts.slice(1).join("").replace(/\D/g, ""));
+    } else {
+      setEditContactPrefix("+60");
+      setEditContactNumber(fullContact.replace(/\D/g, ""));
+    }
+    setEditAddress(user?.location?.address || "No 1, Taman Bukit Bintang 1");
+    setEditPostcode(user?.location?.postcode || "55100");
+    setEditState(user?.location?.state || "Kuala Lumpur");
+    setEditCountry(user?.location?.country || "Malaysia");
+    setEditDescription(
+      user?.description ||
+      "Dedicated to emergency flood relief, transparent in-kind food distribution, and urgent community supply dispatching across regional hubs."
+    );
+    setEditInstagram(user?.instagram || "ngo1_aidstory");
+    setEditFacebook(user?.facebook || "ngo1relief");
+    setEditRoleType(user?.roleType || "AIDSTORY COMMUNITY DISPATCHER");
+    setEditAvatarUrl(user?.avatarUrl || user?.profilePhoto || "");
+    setIsEditingProfile(true);
+  };
+
+  const syncPhotoAcrossRequests = (newPhotoUrl: string, targetUser: any) => {
+    if (typeof window === "undefined" || !targetUser) return;
+    const userEmail = (targetUser.email || "").toLowerCase().trim();
+    const userUsername = (targetUser.username || "").toLowerCase().trim();
+    const userCharity = (targetUser.charityName || "").toLowerCase().trim();
+
+    const updateInKey = (key: string) => {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return;
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          let changed = false;
+          const updated = list.map((r: any) => {
+            const authorEmail = (r.authorEmail || r.createdByUserEmail || "").toLowerCase().trim();
+            const authorName = (r.authorName || r.createdByUsername || "").toLowerCase().trim();
+            const orgName = (r.organizerName || "").toLowerCase().trim();
+
+            const isMatch =
+              (userEmail && (authorEmail === userEmail || orgName === userEmail)) ||
+              (userUsername && (authorName === userUsername || orgName === userUsername)) ||
+              (userCharity && orgName === userCharity);
+
+            if (isMatch) {
+              changed = true;
+              return { ...r, organizerAvatar: newPhotoUrl || undefined };
+            }
+            return r;
+          });
+          if (changed) {
+            localStorage.setItem(key, JSON.stringify(updated));
+          }
+        }
+      } catch (e) {}
+    };
+
+    updateInKey("aidstory_recipient_requests");
+    updateInKey("aidstory_all_needs");
+    window.dispatchEvent(new Event("storage"));
+    window.dispatchEvent(new CustomEvent("aidstory_user_updated"));
+  };
+
+  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      setProfileToast("Please upload an image file (JPG, PNG, WebP) 📸");
+      setTimeout(() => setProfileToast(""), 3500);
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      setProfileToast("Image size must be under 5MB ⚠️");
+      setTimeout(() => setProfileToast(""), 3500);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      setEditAvatarUrl(result);
+      if (user) {
+        const updatedUser = { ...user, avatarUrl: result, profilePhoto: result };
+        setUser(updatedUser);
+        localStorage.setItem("aidstory_current_user", JSON.stringify(updatedUser));
+        try {
+          const allUsers = JSON.parse(localStorage.getItem("aidstory_users") || "[]");
+          const idx = allUsers.findIndex((u: any) => u.email?.toLowerCase() === user.email?.toLowerCase());
+          if (idx > -1) {
+            allUsers[idx].avatarUrl = result;
+            allUsers[idx].profilePhoto = result;
+            localStorage.setItem("aidstory_users", JSON.stringify(allUsers));
+          }
+        } catch (err) {}
+        syncPhotoAcrossRequests(result, updatedUser);
+      }
+      setProfileToast("Profile photo updated! 📸✨");
+      setTimeout(() => setProfileToast(""), 3500);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleRemovePhoto = () => {
+    setEditAvatarUrl("");
+    if (user) {
+      const updatedUser = { ...user, avatarUrl: "", profilePhoto: "" };
+      setUser(updatedUser);
+      localStorage.setItem("aidstory_current_user", JSON.stringify(updatedUser));
+      try {
+        const allUsers = JSON.parse(localStorage.getItem("aidstory_users") || "[]");
+        const idx = allUsers.findIndex((u: any) => u.email?.toLowerCase() === user.email?.toLowerCase());
+        if (idx > -1) {
+          allUsers[idx].avatarUrl = "";
+          allUsers[idx].profilePhoto = "";
+          localStorage.setItem("aidstory_users", JSON.stringify(allUsers));
+        }
+      } catch (err) {}
+      syncPhotoAcrossRequests("", updatedUser);
+    }
+    setProfileToast("Profile photo removed.");
+    setTimeout(() => setProfileToast(""), 3000);
+  };
+
+  const handleSaveProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!/^\d{7,11}$/.test(editContactNumber)) {
+      setProfileToast("Enter a contact number using 7 to 11 digits only.");
+      return;
+    }
+    const updatedUser = {
+      ...(user || {}),
+      username: editUsername.trim() || (user?.username || "NGO01"),
+      email: editEmail.trim() || (user?.email || "ngo1@gmail.com"),
+      contact: `${editContactPrefix.trim()} ${editContactNumber.trim()}`.trim(),
+      description: editDescription.trim() || (user?.description || "Dedicated to emergency flood relief, transparent in-kind food distribution, and urgent community supply dispatching across regional hubs."),
+      instagram: editInstagram.trim().replace(/^@/, "").replace(/^https?:\/\/(www\.)?instagram\.com\//, ""),
+      facebook: editFacebook.trim().replace(/^https?:\/\/(www\.)?facebook\.com\//, ""),
+      roleType: editRoleType,
+      avatarUrl: editAvatarUrl,
+      profilePhoto: editAvatarUrl,
+      location: {
+        address: editAddress.trim(),
+        postcode: editPostcode.trim(),
+        state: editState.trim(),
+        country: editCountry.trim()
+      }
+    };
+
+    setUser(updatedUser);
+    localStorage.setItem("aidstory_current_user", JSON.stringify(updatedUser));
+
+    // Save to Cloud Firestore
+    saveUserToCloud(updatedUser).catch((err) => console.warn("Cloud user profile update failed:", err));
+
+    try {
+      const allUsers = JSON.parse(localStorage.getItem("aidstory_users") || "[]");
+      const idx = allUsers.findIndex((u: any) => u.email?.toLowerCase() === updatedUser.email?.toLowerCase());
+      if (idx > -1) {
+        allUsers[idx] = { ...allUsers[idx], ...updatedUser };
+        localStorage.setItem("aidstory_users", JSON.stringify(allUsers));
+      }
+    } catch (err) {}
+
+    syncPhotoAcrossRequests(editAvatarUrl, updatedUser);
+
+    setIsEditingProfile(false);
+    setProfileToast("Profile successfully updated! ✨");
+    setTimeout(() => setProfileToast(""), 3500);
+  };
+
+  const getSubscribersCount = (): number => {
+    let baseCount = 1248;
+    try {
+      const subs = localStorage.getItem("aidstory_subscribed_organizers");
+      if (subs) {
+        const list = JSON.parse(subs);
+        if (Array.isArray(list)) {
+          baseCount += list.length * 37;
+        }
+      }
+    } catch (e) {}
+    return baseCount;
   };
 
   // State managers for interactive sub-features
@@ -346,6 +606,7 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
 
   const [completedDonations, setCompletedDonations] = useState<Array<{
     id: string;
+    userEmail?: string;
     title: string;
     category?: string;
     quantity?: string | number;
@@ -380,22 +641,59 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
 
     syncDonations();
     window.addEventListener("storage", syncDonations);
-    return () => window.removeEventListener("storage", syncDonations);
+    window.addEventListener("aidstory_donations_updated", syncDonations);
+    window.addEventListener("aidstory_cart_checkout_completed", syncDonations);
+
+    // Real-time Cloud Firestore donations subscription
+    const unsubDonations = subscribeToAllUserDonations((cloudDonations) => {
+      if (cloudDonations && cloudDonations.length > 0) {
+        setCompletedDonations((prev) => {
+          const map = new Map<string, (typeof prev)[number]>(
+            cloudDonations.map((donation) => [donation.id, donation])
+          );
+          prev.forEach((d) => {
+            if (!map.has(d.id)) {
+              map.set(d.id, d);
+            }
+          });
+          const merged = Array.from(map.values());
+          try {
+            localStorage.setItem("aidstory_completed_donations", JSON.stringify(merged));
+          } catch (e) {}
+          return merged;
+        });
+      }
+    });
+
+    return () => {
+      window.removeEventListener("storage", syncDonations);
+      window.removeEventListener("aidstory_donations_updated", syncDonations);
+      window.removeEventListener("aidstory_cart_checkout_completed", syncDonations);
+      unsubDonations();
+    };
   }, []);
 
   // Calculate dynamic count of completed donations based on user's real actions
   const getCompletedDonationsCount = (): number => {
+    if (!user) {
+      return 0;
+    }
+
+    const userEmail = (user.email || "").trim().toLowerCase();
+    if (!userEmail) return 0;
+
+    // Donation history is shared in local storage and synchronized from the
+    // cloud, so it must be scoped to the signed-in donor. Never use seeded or
+    // unowned totals for a newly registered account.
     const completedSet = new Set<string>();
-    completedDonations.forEach(d => {
+    completedDonations
+      .filter((donation) => (donation.userEmail || "").trim().toLowerCase() === userEmail)
+      .forEach(d => {
       if (d.title) completedSet.add(d.title);
       else if (d.id) completedSet.add(d.id);
-    });
-    pledgedItems.forEach(item => {
-      if (item) completedSet.add(item);
-    });
+      });
 
-    const baseCount = typeof user?.donationsCompleted === "number" ? user.donationsCompleted : 0;
-    return baseCount + Math.max(completedSet.size, completedDonations.length, pledgedItems.length);
+    return completedSet.size;
   };
 
   const handlePledgeNeed = (needTitle: string) => {
@@ -409,8 +707,9 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
 
     const newDonation = {
       id: `pledge-${Date.now()}`,
+      userEmail: user?.email || "anonymous@aidstory.org",
       title: needTitle,
-      date: new Date().toISOString(),
+      date: new Date().toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" }),
       status: "completed"
     };
 
@@ -421,6 +720,15 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
       } catch (err) {}
       return next;
     });
+
+    // Auto-sync donation to Cloud Firestore
+    saveUserDonationToCloud({
+      id: newDonation.id,
+      userEmail: user?.email || "anonymous@aidstory.org",
+      title: newDonation.title,
+      date: newDonation.date,
+      status: newDonation.status
+    }).catch((err) => console.warn("Cloud donation save error:", err));
 
     setSuccessMessage(`Pledge for "${needTitle}" registered successfully! Thank you for making a difference.`);
     setTimeout(() => setSuccessMessage(""), 4000);
@@ -601,11 +909,35 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
   // State for Post Request & Recipient Verification
   const [isVerifiedRecipient, setIsVerifiedRecipient] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
+      const stored = localStorage.getItem("aidstory_current_user");
+      if (!stored) return false;
+      try {
+        const u = JSON.parse(stored);
+        if (u) {
+          const userEmail = (u.email || "").toLowerCase().trim();
+          const username = (u.username || "").toLowerCase().trim();
+          const isAdmin = userEmail === "admin@aidstory.org" || userEmail === "aidstoryadmin@gmail.com" || username === "admin" || u.role === "admin";
+          if (isAdmin) return true;
+
+          // Donor-only users cannot post requests unless verified as recipient
+          if (u.role === "donor") return false;
+
+          // NGO or Recipient accounts must be verified (not pending)
+          if ((u.role === "recipient" || u.role === "organization") && u.isVerified === true) {
+            return true;
+          }
+
+          if (u.isVerified === true && u.role !== "donor") {
+            return true;
+          }
+        }
+      } catch (e) {}
       return localStorage.getItem("aidstory_verified_recipient") === "true";
     }
     return false;
   });
   const [isPostLockedModalOpen, setIsPostLockedModalOpen] = useState(false);
+  const [lockedModalReason, setLockedModalReason] = useState<"auth" | "verify" | "pending_ngo" | "donor_only">("verify");
 
   const [postTitle, setPostTitle] = useState("");
   const [postLocation, setPostLocation] = useState("");
@@ -744,19 +1076,74 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
     }
   ];
 
+  const getVerifiedRecipientHistory = () => {
+    let locallyStoredUsers: any[] = [];
+    if (typeof window !== "undefined") {
+      try {
+        const parsed = JSON.parse(localStorage.getItem("aidstory_users") || "[]");
+        if (Array.isArray(parsed)) locallyStoredUsers = parsed;
+      } catch (e) {}
+    }
+
+    const usersByEmail = new Map<string, any>();
+    [...SEED_USERS, ...locallyStoredUsers].forEach((account: any) => {
+      const email = (account.email || "").toLowerCase().trim();
+      if (email) usersByEmail.set(email, account);
+    });
+
+    return Array.from(usersByEmail.values())
+      .filter((account: any) =>
+        account.isVerified === true &&
+        (account.role === "recipient" || account.role === "organization")
+      )
+      .map((account: any) => ({
+        id: `verified_${account.email.toLowerCase().replace(/[^a-z0-9]/g, "_")}`,
+        email: account.email.toLowerCase(),
+        name: account.charityName || account.organizationName || account.username,
+        type: account.role === "organization" ? "NGO / Charity" : "Verified Recipient",
+        displayType: account.role === "organization" ? "Verified NGO / Charity" : "Verified Recipient",
+        info: account.bio || "Verified AidStory recipient account.",
+        phone: account.contact || account.phone || "Not provided",
+        needs: "Verified to post and receive community-aid requests",
+        documents: ["AidStory_Verification_Approved"],
+        status: "Approved",
+        submittedAt: account.joinedDate
+          ? new Date(account.joinedDate).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+          : "Verified account"
+      }));
+  };
+
+  const mergeVerifiedRecipientHistory = (applications: any[]) => {
+    const existingIds = new Set(applications.map((application) => application.id));
+    const verifiedHistory = getVerifiedRecipientHistory().filter(
+      (application) => !existingIds.has(application.id)
+    );
+    return [...applications, ...verifiedHistory];
+  };
+
   const [recipientApplications, setRecipientApplications] = useState<any[]>(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("aidstory_recipient_applications");
       if (saved) {
         try {
-          return JSON.parse(saved);
+          return mergeVerifiedRecipientHistory(JSON.parse(saved));
         } catch (e) {
-          return DEFAULT_APPLICATIONS;
+          return mergeVerifiedRecipientHistory(DEFAULT_APPLICATIONS);
         }
       }
     }
-    return DEFAULT_APPLICATIONS;
+    return mergeVerifiedRecipientHistory(DEFAULT_APPLICATIONS);
   });
+
+  useEffect(() => {
+    setRecipientApplications((current) => {
+      const merged = mergeVerifiedRecipientHistory(current);
+      if (merged.length !== current.length && typeof window !== "undefined") {
+        localStorage.setItem("aidstory_recipient_applications", JSON.stringify(merged));
+      }
+      return merged;
+    });
+  }, []);
 
   const [appFilterStatus, setAppFilterStatus] = useState<"All" | "Pending" | "Approved" | "Rejected">("All");
   const [applicationActionToast, setApplicationActionToast] = useState<string | null>(null);
@@ -822,16 +1209,47 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
     const nameStr = appTarget ? appTarget.name : "Applicant";
     setApplicationActionToast(`Application for "${nameStr}" status changed to ${newStatus}.`);
 
-    const hasApproved = updated.some((a) => a.status === "Approved");
-    if (hasApproved) {
-      setIsVerifiedRecipient(true);
+    if (newStatus === "Approved") {
       if (typeof window !== "undefined") {
-        localStorage.setItem("aidstory_verified_recipient", "true");
-      }
-    } else {
-      setIsVerifiedRecipient(false);
-      if (typeof window !== "undefined") {
-        localStorage.setItem("aidstory_verified_recipient", "false");
+        const applicantEmail = (appTarget?.email || "").toLowerCase().trim();
+
+        // Persist recipient approval on the applicant account, not on the
+        // administrator who is reviewing the application.
+        if (applicantEmail) {
+          try {
+            const allUsers = JSON.parse(localStorage.getItem("aidstory_users") || "[]");
+            const approvedUser = allUsers.find((account: any) =>
+              (account.email || "").toLowerCase().trim() === applicantEmail
+            );
+            if (approvedUser) {
+              const updatedApplicant = { ...approvedUser, role: "recipient", isVerified: true };
+              const updatedUsers = allUsers.map((account: any) =>
+                (account.email || "").toLowerCase().trim() === applicantEmail ? updatedApplicant : account
+              );
+              localStorage.setItem("aidstory_users", JSON.stringify(updatedUsers));
+              saveUserToCloud(updatedApplicant).catch(() => {});
+            }
+          } catch (e) {}
+        }
+
+        // If the approved applicant is open in this browser, update the active
+        // account immediately so recipient-only features become available.
+        const currentSaved = localStorage.getItem("aidstory_current_user");
+        if (currentSaved) {
+          try {
+            const u = JSON.parse(currentSaved);
+            if (
+              (applicantEmail && (u.email || "").toLowerCase().trim() === applicantEmail) ||
+              (!applicantEmail && (u.username === nameStr || u.charityName === nameStr))
+            ) {
+              const updatedU = { ...u, isVerified: true, role: "recipient" };
+              localStorage.setItem("aidstory_current_user", JSON.stringify(updatedU));
+              localStorage.setItem("aidstory_verified_recipient", "true");
+              setUser(updatedU);
+              setIsVerifiedRecipient(true);
+            }
+          } catch (e) {}
+        }
       }
     }
 
@@ -866,6 +1284,7 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
     const newApp = {
       id: `app_${Date.now()}`,
       name: recipientName || user?.username || "Anonymous Applicant",
+      email: user?.email?.trim().toLowerCase(),
       type: recipientType,
       displayType:
         recipientType === "Faced Difficulties"
@@ -983,7 +1402,44 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
     setTimeout(() => setPushToggleToast(""), 4500);
   };
 
+  const normalizeId = (val?: string) => {
+    if (!val) return "";
+    return val
+      .toLowerCase()
+      .trim()
+      .replace(/^(you\s*\(|\))/g, "")
+      .replace(/[^a-z0-9]/g, "")
+      .replace(/0+(\d)/g, "$1");
+  };
+
+  const isSameAsCurrentUser = (orgName: string) => {
+    if (!user) return false;
+    const currentUsernameNorm = normalizeId(user.username);
+    const currentCharityNorm = normalizeId(user.charityName);
+    const currentUserEmail = (user.email || "").toLowerCase().trim();
+    const targetNorm = normalizeId(orgName);
+
+    if (currentUserEmail && orgName.toLowerCase().trim() === currentUserEmail) return true;
+    if (currentUsernameNorm && (
+      currentUsernameNorm === targetNorm ||
+      (targetNorm && targetNorm.includes(currentUsernameNorm)) ||
+      (targetNorm && currentUsernameNorm.includes(targetNorm))
+    )) return true;
+    if (currentCharityNorm && (
+      currentCharityNorm === targetNorm ||
+      (targetNorm && targetNorm.includes(currentCharityNorm)) ||
+      (targetNorm && currentCharityNorm.includes(targetNorm))
+    )) return true;
+
+    return false;
+  };
+
   const handleToggleRequesterSubscription = (orgName: string) => {
+    if (isSameAsCurrentUser(orgName)) {
+      setPushToggleToast("⚠️ You cannot subscribe to your own account.");
+      setTimeout(() => setPushToggleToast(""), 4000);
+      return;
+    }
     setSubscribedRequesters((prev) => {
       let updated: string[];
       if (prev.includes(orgName)) {
@@ -1049,10 +1505,10 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
   ];
 
   return (
-    <div className="min-h-screen bg-[#f4efe5] text-[#2c221a] flex flex-col justify-between selection:bg-brand-olive selection:text-brand-dark relative animate-fadeIn py-8 px-4 md:px-8 overflow-hidden">
+    <div className="min-h-screen bg-[#2e2117] text-[#2c221a] flex flex-col justify-between selection:bg-brand-olive selection:text-brand-dark relative animate-fadeIn overflow-hidden">
       
       {/* Whimsical Floating Background Elements */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none select-none z-0">
+      <div className="absolute inset-0 overflow-hidden pointer-events-none select-none z-0 hidden">
         {floatingItems.map((item, index) => (
           <motion.div
             key={index}
@@ -1079,8 +1535,245 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
         ))}
       </div>
 
+      {/* Mobile menu: portrait scrapbook artwork with the same object-based actions as the desktop menu. */}
+      <section className="relative z-20 min-h-[100svh] w-full overflow-hidden bg-[#2e2117] sm:hidden">
+        <img src={mobilePicnicMainMenuArt} alt="AidStory picnic main menu" className="absolute inset-0 h-full w-full object-cover select-none" draggable={false} />
+
+        <button onClick={handleLogout} className="absolute right-[4%] top-[2%] z-30 rounded-full bg-[#536340] px-3 py-2 text-xs font-bold text-white shadow-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-white">Log Out</button>
+
+        <div className="absolute inset-0 z-20" aria-label="Picnic navigation">
+          <button aria-label="Leave feedback comments" title="Leave your comments" onClick={() => navigateToView("comments")} className="absolute left-[4%] top-[8%] h-[17%] w-[29%] rounded-[18%] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]" />
+
+          <button aria-label="Open future enhancement menu" title="Future enhancement" onClick={() => setIsFutureEnhancementsOpen(true)} className="absolute left-[13%] top-[52%] h-[16%] w-[29%] rounded-[8%] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]" />
+
+          <button aria-label="Apply now" title="Apply Now" onClick={() => {
+            if (!user) { setLockedModalReason("auth"); setIsPostLockedModalOpen(true); return; }
+            setActiveTab("apply");
+          }} className="absolute left-0 top-[55%] h-[18%] w-[20%] rounded-[20%] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]" />
+
+          <button aria-label="Post Request" title="Post Request" onClick={() => {
+            if (!user) { setLockedModalReason("auth"); setIsPostLockedModalOpen(true); }
+            else if (isVerifiedRecipient || isAdmin) { navigateToView("your_request"); }
+            else if (user.role === "donor") { setLockedModalReason("donor_only"); setIsPostLockedModalOpen(true); }
+            else if ((user.role === "organization" || user.role === "recipient") && !user.isVerified) { setLockedModalReason("pending_ngo"); setIsPostLockedModalOpen(true); }
+            else { setLockedModalReason("verify"); setIsPostLockedModalOpen(true); }
+          }} className="absolute bottom-[10%] left-[2%] h-[17%] w-[22%] rounded-[20%] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]" />
+
+          <button aria-label="Open Delivery Status" title="Delivery Status" onClick={() => {
+            if (!user) { setLockedModalReason("auth"); setIsPostLockedModalOpen(true); return; }
+            navigateToView("delivery_status");
+          }} className="absolute bottom-[4%] left-[21%] h-[16%] w-[15%] rounded-[20%] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]" />
+
+          <button aria-label="Open Profile" title="Profile" onClick={() => {
+            if (!user) { setLockedModalReason("auth"); setIsPostLockedModalOpen(true); return; }
+            setActiveTab("profile");
+          }} className="absolute bottom-0 left-[35%] h-[23%] w-[33%] rounded-[15%] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]" />
+
+          <button aria-label="Open Donate Box" title="Donate Box" onClick={() => {
+            if (!user) { setLockedModalReason("auth"); setIsPostLockedModalOpen(true); return; }
+            navigateToView("preparing_donate_box");
+          }} className="absolute right-0 top-[47%] h-[22%] w-[34%] rounded-[14%] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]" />
+
+          <button aria-label="Browse Needs" title="Browse Needs" onClick={() => navigateToView("needs")} className="absolute bottom-0 right-0 h-[30%] w-[40%] rounded-[16%] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]" />
+        </div>
+      </section>
+
+      {/* Picnic main menu: each pictured item is a transparent, keyboard-accessible action area. */}
+      <section className="relative z-20 hidden min-h-screen w-full overflow-hidden bg-[#2e2117] sm:block">
+        <img
+          src={picnicMainMenuArt}
+          alt="AidStory picnic main menu"
+          className="absolute inset-0 h-full w-full object-cover select-none"
+          draggable={false}
+        />
+
+        <button
+          onClick={handleLogout}
+          className="absolute right-[3%] top-[3%] z-30 rounded-full bg-[#536340] px-5 py-2.5 text-base font-bold text-white shadow-lg transition hover:scale-105 hover:bg-[#39462f] focus-visible:outline focus-visible:outline-2 focus-visible:outline-white"
+        >
+          Log Out
+        </button>
+
+        <div className="absolute inset-0 z-20" aria-label="Picnic navigation">
+          {/* Basket: Donate Box */}
+          <button
+            aria-label="Open Donate Box"
+            title="Donate Box"
+            onClick={() => {
+              if (!user) {
+                setLockedModalReason("auth");
+                setIsPostLockedModalOpen(true);
+                return;
+              }
+              navigateToView("preparing_donate_box");
+            }}
+            className="group picnic-menu-hotspot isolate absolute left-[72%] top-[20%] h-[43%] w-[27%] rounded-[14%] bg-transparent focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]"
+          >
+            <img src={picnicDonationBasketArt} alt="" aria-hidden="true" className="picnic-hover-bounce pointer-events-none absolute inset-0 z-10 h-full w-full object-contain opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100" />
+            <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#2e2117]/90 px-3 py-1 text-xs font-bold text-white opacity-0 shadow transition group-hover:opacity-100 group-focus-visible:opacity-100">Donate Box</span>
+          </button>
+
+          {/* Toy car: Delivery Status */}
+          <button
+            aria-label="Open Delivery Status"
+            title="Delivery Status"
+            onClick={() => {
+              if (!user) {
+                setLockedModalReason("auth");
+                setIsPostLockedModalOpen(true);
+                return;
+              }
+              navigateToView("delivery_status");
+            }}
+            className="group picnic-menu-hotspot isolate absolute left-[19%] top-[72%] h-[20%] w-[15%] rounded-[20%] bg-transparent focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]"
+          >
+            <img src={picnicToyCarArt} alt="" aria-hidden="true" className="picnic-hover-bounce pointer-events-none absolute inset-0 z-10 h-full w-full object-contain opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100" />
+            <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#2e2117]/90 px-3 py-1 text-xs font-bold text-white opacity-0 shadow transition group-hover:opacity-100 group-focus-visible:opacity-100">Delivery Status</span>
+          </button>
+
+          {/* Lemonade, bread and strawberries: Browse Needs */}
+          <button
+            aria-label="Browse Needs"
+            title="Browse Needs"
+            onClick={() => navigateToView("needs")}
+            className="group picnic-menu-hotspot isolate absolute left-[64%] top-[56%] h-[42%] w-[35%] rounded-[16%] bg-transparent focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]"
+          >
+            <img src={picnicBrowseNeedsArt} alt="" aria-hidden="true" className="picnic-hover-bounce pointer-events-none absolute inset-0 z-10 h-full w-full object-contain opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100" />
+            <span className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#2e2117]/90 px-3 py-1 text-xs font-bold text-white opacity-0 shadow transition group-hover:opacity-100 group-focus-visible:opacity-100">Browse Needs</span>
+          </button>
+
+          {/* Camera: Post Request */}
+          <button
+            aria-label="Post Request"
+            title="Post Request"
+            onClick={() => {
+              if (!user) {
+                setLockedModalReason("auth");
+                setIsPostLockedModalOpen(true);
+              } else if (isVerifiedRecipient || isAdmin) {
+                navigateToView("your_request");
+              } else if (user.role === "donor") {
+                setLockedModalReason("donor_only");
+                setIsPostLockedModalOpen(true);
+              } else if ((user.role === "organization" || user.role === "recipient") && !user.isVerified) {
+                setLockedModalReason("pending_ngo");
+                setIsPostLockedModalOpen(true);
+              } else {
+                setLockedModalReason("verify");
+                setIsPostLockedModalOpen(true);
+              }
+            }}
+            className="group picnic-menu-hotspot isolate absolute left-[3%] top-[72%] h-[24%] w-[16%] rounded-[20%] bg-transparent focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]"
+          >
+            <img src={picnicCameraArt} alt="" aria-hidden="true" className="picnic-hover-bounce pointer-events-none absolute inset-0 z-10 h-full w-full object-contain opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100" />
+            <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#2e2117]/90 px-3 py-1 text-xs font-bold text-white opacity-0 shadow transition group-hover:opacity-100 group-focus-visible:opacity-100">Post Request</span>
+          </button>
+
+          {/* Notebook: Profile */}
+          <button
+            aria-label="Open Profile"
+            title="Profile"
+            onClick={() => {
+              if (!user) {
+                setLockedModalReason("auth");
+                setIsPostLockedModalOpen(true);
+                return;
+              }
+              setActiveTab("profile");
+            }}
+            className="group picnic-menu-hotspot isolate absolute left-[34%] top-[72%] h-[28%] w-[27%] rounded-[15%] bg-transparent focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]"
+          >
+            <img src={picnicNotebookArt} alt="" aria-hidden="true" className="picnic-hover-bounce pointer-events-none absolute inset-0 z-10 h-full w-full object-contain opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100" />
+            <span className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#2e2117]/90 px-3 py-1 text-xs font-bold text-white opacity-0 shadow transition group-hover:opacity-100 group-focus-visible:opacity-100">Profile</span>
+          </button>
+
+          {/* Sticky note: public feedback */}
+          <button
+            aria-label="Leave feedback comments"
+            title="Leave your comments"
+            onClick={() => navigateToView("comments")}
+            className="group picnic-menu-hotspot isolate absolute left-[4%] top-[12%] h-[26%] w-[17%] rounded-[18%] bg-transparent focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]"
+          >
+            <img src={picnicCommentsNoteArt} alt="" aria-hidden="true" className="picnic-hover-bounce pointer-events-none absolute inset-0 z-10 h-full w-full object-contain opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100" />
+            <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#2e2117]/90 px-3 py-1 text-xs font-bold text-white opacity-0 shadow transition group-hover:opacity-100 group-focus-visible:opacity-100">Feedback</span>
+          </button>
+
+          {/* Flower basket: recipient application */}
+          <button
+            aria-label="Apply now"
+            title="Apply Now"
+            onClick={() => {
+              if (!user) {
+                setLockedModalReason("auth");
+                setIsPostLockedModalOpen(true);
+                return;
+              }
+              setActiveTab("apply");
+            }}
+            className="group picnic-menu-hotspot isolate absolute left-0 top-[37%] h-[37%] w-[16%] rounded-[20%] bg-transparent focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]"
+          >
+            <img src={picnicFlowerBasketArt} alt="" aria-hidden="true" className="picnic-hover-bounce pointer-events-none absolute inset-0 z-10 h-full w-full object-contain opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100" />
+            <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#2e2117]/90 px-3 py-1 text-xs font-bold text-white opacity-0 shadow transition group-hover:opacity-100 group-focus-visible:opacity-100">Apply Now</span>
+          </button>
+
+          {/* Framed meadow photograph: future enhancement tools */}
+          <button
+            aria-label="Open future enhancement menu"
+            title="Future enhancement"
+            onClick={() => setIsFutureEnhancementsOpen(true)}
+            className="group picnic-menu-hotspot isolate absolute left-[14%] top-[41%] h-[27%] w-[17%] rounded-[8%] bg-transparent focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#eff5b0]"
+          >
+            <img src={picnicFramedSceneArt} alt="" aria-hidden="true" className="picnic-hover-bounce pointer-events-none absolute inset-0 z-10 h-full w-full object-contain opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100" />
+            <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#2e2117]/90 px-3 py-1 text-xs font-bold text-white opacity-0 shadow transition group-hover:opacity-100 group-focus-visible:opacity-100">Future enhancement</span>
+          </button>
+        </div>
+      </section>
+
+      <AnimatePresence>
+        {isFutureEnhancementsOpen && (
+          <motion.div
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsFutureEnhancementsOpen(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.94, y: 18 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.94, y: 18 }}
+              transition={{ type: "spring", duration: 0.45 }}
+              onClick={(event) => event.stopPropagation()}
+              className="relative w-full max-w-2xl rounded-[2rem] border border-[#f7e7c4]/50 bg-[#3b2a1e] p-6 text-[#fff7e9] shadow-2xl md:p-8"
+            >
+              <button onClick={() => setIsFutureEnhancementsOpen(false)} className="absolute right-4 top-4 rounded-full p-2 text-[#fff7e9]/70 hover:bg-white/10 hover:text-white" aria-label="Close future enhancement menu"><X className="h-5 w-5" /></button>
+              <p className="font-mono text-xs uppercase tracking-[0.24em] text-[#d7e890]">AidStory picnic collection</p>
+              <h2 className="mt-2 font-serif text-4xl italic">Future enhancement</h2>
+              <p className="mt-3 max-w-xl text-sm text-[#fff7e9]/75">More tools are kept here so the picnic menu stays simple and welcoming.</p>
+              <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {[
+                  ["Notification", "notification"],
+                  ["Dashboard", "dashboard"],
+                  ["Your Inventory", "inventory"],
+                  ["Customer Service", "chatbot"],
+                  ["Settings", "settings"]
+                ].map(([label, tab]) => (
+                  <button
+                    key={tab}
+                    onClick={() => { setIsFutureEnhancementsOpen(false); setActiveTab(tab); }}
+                    className="rounded-2xl border border-[#f7e7c4]/20 bg-[#55402f] px-4 py-4 text-left font-semibold transition hover:-translate-y-0.5 hover:bg-[#66503b]"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Upper Navigation Header */}
-      <header className="relative z-10 max-w-6xl mx-auto w-full mb-8 flex justify-between items-center border-none pb-0">
+      <header className="relative z-10 max-w-6xl mx-auto w-full mb-8 justify-between items-center border-none pb-0 hidden">
         <div className="flex items-center gap-2">
           <span className="font-serif italic text-[80px] text-[#2c221a] font-light tracking-tight">
             AidStory
@@ -1096,7 +1789,7 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
       </header>
 
       {/* Center 3D Flippable Card Stage */}
-      <main className="relative z-10 max-w-4xl mx-auto w-full flex-grow flex flex-col items-center justify-center pt-0 pb-4">
+      <main className="relative z-10 max-w-4xl mx-auto w-full flex-grow flex-col items-center justify-center pt-0 pb-4 hidden">
 
         <div className="w-full perspective-2000 relative min-h-[560px] md:min-h-[500px]">
           <motion.div
@@ -1118,8 +1811,17 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <div className="space-y-4 w-full flex flex-col items-center">
                     {/* User Icon & Name */}
                     <div className="flex flex-col items-center gap-3 w-full">
-                      <div className="w-[150px] h-[150px] rounded-full bg-brand-cream/10 border border-brand-cream/20 flex items-center justify-center text-brand-cream shrink-0 shadow-inner">
-                        <User className="w-[75px] h-[75px]" />
+                      <div className="w-[150px] h-[150px] rounded-full bg-brand-cream/10 border-2 border-brand-cream/20 flex items-center justify-center text-brand-cream shrink-0 shadow-inner overflow-hidden">
+                        {user?.avatarUrl || user?.profilePhoto ? (
+                          <img
+                            src={user.avatarUrl || user.profilePhoto}
+                            alt={user?.username || "Profile"}
+                            className="w-full h-full object-cover"
+                            referrerPolicy="no-referrer"
+                          />
+                        ) : (
+                          <User className="w-[75px] h-[75px]" />
+                        )}
                       </div>
                       <div className="text-center">
                         <h2 className="text-3xl font-sans font-extrabold text-brand-cream tracking-wide leading-tight">
@@ -1127,14 +1829,25 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                         </h2>
                         <div className="flex items-center justify-center gap-2 mt-1 flex-wrap">
                           <p className="text-xs font-mono text-brand-olive uppercase tracking-widest">
-                             {user ? "Registered Member" : "Guest Explorer"}
+                            {user
+                              ? user.role === "donor"
+                                ? "Community In-Kind Donor"
+                                : user.role === "admin"
+                                ? "Platform Administrator"
+                                : user.charityName || "Community Recipient"
+                              : "Guest Explorer"}
                           </p>
-                          {isVerifiedRecipient && (
+                          {Boolean(user && (user.role === "recipient" || user.role === "organization") && (user.isVerified || isVerifiedRecipient)) ? (
                             <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-mono px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1 shadow-sm">
                               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                              Verified
+                              Verified Recipient
                             </span>
-                          )}
+                          ) : Boolean(user && (user.role === "organization" || user.role === "recipient") && !user.isVerified && !isVerifiedRecipient) ? (
+                            <span className="bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-mono px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1 shadow-sm">
+                              <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              NGO Pending Review
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                     </div>
@@ -1387,7 +2100,7 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                       e.stopPropagation();
                       navigateToView("needs");
                     }}
-                    className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
+                    className={`flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto ${isAdmin ? "hidden" : ""}`}
                   >
                     <span className="text-4xl pointer-events-none select-none">🛍️</span>
                     <span className="pointer-events-none select-none">Browse Needs</span>
@@ -1397,9 +2110,14 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      navigateToView("preparing_donate_box");
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else {
+                        navigateToView("preparing_donate_box");
+                      }
                     }}
-                    className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
+                    className={`flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto ${isAdmin ? "hidden" : ""}`}
                   >
                     <span className="text-4xl pointer-events-none select-none">📦</span>
                     <span className="pointer-events-none select-none">Donate Box</span>
@@ -1409,9 +2127,14 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveTab("delivery");
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else {
+                        navigateToView("delivery_status");
+                      }
                     }}
-                    className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
+                    className={`flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto ${isAdmin ? "hidden" : ""}`}
                   >
                     <span className="text-4xl pointer-events-none select-none">🚚</span>
                     <span className="pointer-events-none select-none">Delivery Status</span>
@@ -1421,13 +2144,23 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (isVerifiedRecipient || isAdmin) {
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else if (isVerifiedRecipient || isAdmin) {
                         navigateToView("your_request");
+                      } else if (user.role === "donor") {
+                        setLockedModalReason("donor_only");
+                        setIsPostLockedModalOpen(true);
+                      } else if ((user.role === "organization" || user.role === "recipient") && !user.isVerified) {
+                        setLockedModalReason("pending_ngo");
+                        setIsPostLockedModalOpen(true);
                       } else {
+                        setLockedModalReason("verify");
                         setIsPostLockedModalOpen(true);
                       }
                     }}
-                    className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
+                    className={`flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto ${isAdmin ? "hidden" : ""}`}
                   >
                     <span className="text-4xl pointer-events-none select-none">🧩</span>
                     <span className="pointer-events-none select-none">Post Request</span>
@@ -1437,7 +2170,12 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveTab("profile");
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else {
+                        setActiveTab("profile");
+                      }
                     }}
                     className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
                   >
@@ -1449,14 +2187,19 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveTab("notification");
-                      setUserNotifications((prevNotifs) => {
-                        const updated = prevNotifs.map((n) => ({ ...n, read: true }));
-                        if (typeof window !== "undefined") {
-                          localStorage.setItem("aidstory_user_notifications", JSON.stringify(updated));
-                        }
-                        return updated;
-                      });
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else {
+                        setActiveTab("notification");
+                        setUserNotifications((prevNotifs) => {
+                          const updated = prevNotifs.map((n) => ({ ...n, read: true }));
+                          if (typeof window !== "undefined") {
+                            localStorage.setItem("aidstory_user_notifications", JSON.stringify(updated));
+                          }
+                          return updated;
+                        });
+                      }
                     }}
                     className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto relative"
                   >
@@ -1475,9 +2218,14 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveTab("dashboard");
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else {
+                        setActiveTab("dashboard");
+                      }
                     }}
-                    className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
+                    className={`flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto ${isAdmin ? "hidden" : ""}`}
                   >
                     <span className="text-4xl pointer-events-none select-none">📊</span>
                     <span className="pointer-events-none select-none">Dashboard</span>
@@ -1487,9 +2235,14 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveTab("apply");
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else {
+                        setActiveTab("apply");
+                      }
                     }}
-                    className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
+                    className={`flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto ${isAdmin ? "hidden" : ""}`}
                   >
                     <span className="text-4xl pointer-events-none select-none">🖱️</span>
                     <span className="pointer-events-none select-none">Apply Now</span>
@@ -1499,9 +2252,14 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveTab("inventory");
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else {
+                        setActiveTab("inventory");
+                      }
                     }}
-                    className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
+                    className={`flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto ${isAdmin ? "hidden" : ""}`}
                   >
                     <span className="text-4xl pointer-events-none select-none">🏠</span>
                     <span className="pointer-events-none select-none">Your Inventory</span>
@@ -1511,7 +2269,12 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveTab("chatbot");
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else {
+                        setActiveTab("chatbot");
+                      }
                     }}
                     className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
                   >
@@ -1523,8 +2286,13 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      // Redirect to the existing comments view as feedback
-                      navigateToView("comments");
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else {
+                        // Redirect to the existing comments view as feedback
+                        navigateToView("comments");
+                      }
                     }}
                     className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
                   >
@@ -1536,7 +2304,12 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveTab("settings");
+                      if (!user) {
+                        setLockedModalReason("auth");
+                        setIsPostLockedModalOpen(true);
+                      } else {
+                        setActiveTab("settings");
+                      }
                     }}
                     className="flex items-center gap-3 bg-white hover:bg-yellow-400 text-[#2c221a] py-3.5 px-4 rounded-full font-sans font-bold text-sm shadow-sm transition-all duration-300 hover:scale-[1.03] active:scale-[0.98] cursor-pointer w-full max-w-[200px] mx-auto"
                   >
@@ -1585,22 +2358,34 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
       </main>
 
       {/* Footer copyright */}
-      <footer className="relative z-10 max-w-6xl mx-auto w-full text-center mt-8 text-xs text-[#2c221a]/50 font-light border-t border-[#2c221a]/10 pt-4">
+      <footer className="relative z-10 max-w-6xl mx-auto w-full text-center mt-8 text-xs text-[#2c221a]/50 font-light border-t border-[#2c221a]/10 pt-4 hidden">
         <p>© 2026 AidStory. All rights reserved.</p>
       </footer>
 
       {/* DETAILED INTERACTIVE TAB MODALS (AnimatePresence) */}
       <AnimatePresence>
         {activeTab && activeTab !== "apply" && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <motion.div 
+            key={`main-menu-tab-modal-${activeTab}`}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className={`fixed inset-0 z-50 ${
+              activeTab === "application"
+                ? "overflow-y-auto bg-[#f4efe5]"
+                : "flex items-center justify-center p-4"
+            }`}
+          >
             {/* Modal Backdrop */}
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setActiveTab(null)}
-              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-            />
+            {activeTab !== "application" && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setActiveTab(null)}
+                className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+              />
+            )}
 
             {/* Modal Content Window */}
             <motion.div 
@@ -1608,7 +2393,15 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 15 }}
               transition={{ type: "spring", duration: 0.5 }}
-              className={`relative w-full ${activeTab === "donate" ? "max-w-2xl" : "max-w-lg"} bg-[#395244] p-6 md:p-8 rounded-2xl border border-brand-cream/20 shadow-2xl z-10 text-brand-cream max-h-[90vh] overflow-y-auto`}
+              className={`relative w-full ${
+                activeTab === "application"
+                  ? "min-h-screen max-w-none rounded-none bg-[#395244] p-6 md:p-10"
+                  : activeTab === "profile" 
+                  ? "max-w-4xl xl:max-w-5xl" 
+                  : activeTab === "donate" 
+                  ? "max-w-2xl" 
+                  : "max-w-lg"
+              } ${activeTab === "application" ? "" : "bg-[#395244] p-4 sm:p-6 md:p-8 rounded-3xl border border-brand-cream/20 shadow-2xl max-h-[calc(100svh-1rem)] overflow-x-hidden overflow-y-auto"} z-10 text-brand-cream`}
             >
               {/* Close Button */}
               <button 
@@ -1618,9 +2411,11 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                     window.location.hash = "main-menu";
                   }
                 }}
-                className="absolute top-4 right-4 text-brand-cream/75 hover:text-brand-cream transition-colors p-2 rounded-full hover:bg-brand-cream/10 cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center z-20"
+                className={`absolute top-4 right-4 text-brand-cream/75 hover:text-brand-cream transition-colors p-2 rounded-full hover:bg-brand-cream/10 cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center z-20 ${
+                  activeTab === "application" ? "px-4 gap-2 text-sm font-semibold" : ""
+                }`}
               >
-                <X className="w-5 h-5" />
+                {activeTab === "application" ? <span>← Back to Admin Menu</span> : <X className="w-5 h-5" />}
               </button>
 
               {/* BROWSE NEEDS MODAL */}
@@ -2019,6 +2814,18 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                     <Sparkles className="w-4 h-4 text-brand-olive shrink-0" />
                     <span>Optimized route layout cuts local fuel emissions by 32%.</span>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab(null);
+                      navigateToView("delivery_status");
+                    }}
+                    className="w-full py-3 bg-brand-olive hover:bg-[#ffee1a] text-brand-dark rounded-xl font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center justify-center gap-2 shadow-lg"
+                  >
+                    <Truck className="w-4 h-4" />
+                    <span>Open Full Delivery Status & Tracking Page</span>
+                  </button>
                 </div>
               )}
 
@@ -2094,53 +2901,520 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
               {/* PROFILE MODAL */}
               {activeTab === "profile" && (
                 <div className="space-y-4 text-left">
-                  <div className="flex items-center gap-2">
-                    <User className="w-5 h-5 text-brand-olive" />
-                    <h3 className="text-xl font-serif text-brand-cream">Your Account Profile</h3>
+                  {/* Status Banner Toast */}
+                  {profileToast && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 text-xs px-3.5 py-2.5 rounded-xl flex items-center gap-2 shadow-md"
+                    >
+                      <Sparkles className="w-4 h-4 text-emerald-300 shrink-0" />
+                      <span>{profileToast}</span>
+                    </motion.div>
+                  )}
+
+                  {/* Profile Header Bar */}
+                  <div className="flex flex-col items-start gap-3 border-b border-brand-cream/10 pb-3 pr-10 sm:flex-row sm:items-center sm:justify-between sm:pr-0">
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-full bg-brand-olive/20 text-brand-olive flex items-center justify-center border border-brand-olive/30">
+                        <User className="w-4.5 h-4.5" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-serif text-brand-cream sm:text-xl">
+                          {isEditingProfile ? "Edit Account Profile" : "Your Account Profile"}
+                        </h3>
+                        <p className="text-[10px] text-brand-cream/60 font-mono">
+                          {isEditingProfile ? "Update organization identity & public presence" : "NGO & Relief Dispatcher Hub"}
+                        </p>
+                      </div>
+                    </div>
+
+                    {!isEditingProfile ? (
+                      <button
+                        type="button"
+                        onClick={handleStartEditingProfile}
+                        className="shrink-0 px-3.5 py-1.5 rounded-full bg-brand-olive/20 hover:bg-brand-olive text-brand-olive hover:text-[#2c221a] border border-brand-olive/40 text-xs font-mono font-bold flex items-center gap-1.5 transition-all duration-200 cursor-pointer shadow-sm hover:scale-105"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>Edit Profile</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingProfile(false)}
+                        className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/20 text-brand-cream/80 text-xs font-mono transition-colors cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    )}
                   </div>
 
-                  <div className="space-y-3 bg-black/25 border border-brand-cream/10 rounded-xl p-4 font-sans text-xs">
-                    <div className="flex justify-between border-b border-brand-cream/5 pb-2">
-                      <span className="text-brand-cream/50 font-mono">USERNAME:</span>
-                      <span className="font-bold text-brand-cream">{user ? user.username : "Guest User (Example)"}</span>
-                    </div>
+                  {!isEditingProfile ? (
+                    /* ==================================================== */
+                    /* VIEW MODE (HORIZONTAL TWO-COLUMN LAYOUT) */
+                    /* ==================================================== */
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 font-sans text-xs pt-1">
+                      {/* LEFT COLUMN: Identity, Description & Social Channels */}
+                      <div className="lg:col-span-5 space-y-3.5 flex flex-col justify-between">
+                        {/* Avatar & Key Profile Identity Card */}
+                        <div className="flex flex-col items-start gap-3 rounded-2xl border border-brand-cream/15 bg-black/30 p-3 sm:flex-row sm:items-center sm:gap-4 sm:p-4">
+                          {/* Profile Photo with Upload Trigger */}
+                          <div className="relative group w-20 h-20 sm:w-22 sm:h-22 rounded-full shrink-0 overflow-hidden border-2 border-brand-olive/50 bg-black/40 shadow-xl flex items-center justify-center">
+                            {user?.avatarUrl || user?.profilePhoto ? (
+                              <img
+                                src={user.avatarUrl || user.profilePhoto}
+                                alt="Profile"
+                                className="w-full h-full object-cover"
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-[#284234] to-[#1c2e24] text-2xl font-serif text-brand-cream font-bold">
+                                {user?.username ? user.username.substring(0, 2).toUpperCase() : "NG"}
+                              </div>
+                            )}
 
-                    <div className="flex justify-between border-b border-brand-cream/5 pb-2">
-                      <span className="text-brand-cream/50 font-mono">EMAIL ADDRESS:</span>
-                      <span className="text-brand-cream">{user ? user.email : "guest@aidstory.org"}</span>
-                    </div>
+                            {/* Hover Photo Upload Prompt */}
+                            <label className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center text-[9px] font-mono text-brand-cream cursor-pointer transition-opacity duration-200 backdrop-blur-xs">
+                              <Camera className="w-4 h-4 mb-0.5 text-brand-olive" />
+                              <span>Upload</span>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                onChange={handlePhotoUpload}
+                                className="hidden"
+                              />
+                            </label>
+                          </div>
 
-                    <div className="flex justify-between border-b border-brand-cream/5 pb-2">
-                      <span className="text-brand-cream/50 font-mono">CONTACT PREFIX:</span>
-                      <span className="text-brand-cream font-mono">{user ? user.contact : "+60 12-3456789"}</span>
-                    </div>
+                          {/* Identity & Badges */}
+                          <div className="min-w-0 flex-grow space-y-1.5 w-full">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h4 className="text-lg font-serif font-bold text-brand-cream break-words sm:text-xl">
+                                {user ? user.username : "NGO01"}
+                              </h4>
+                              <span className="inline-flex items-center gap-1 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[9px] font-mono px-2 py-0.5 rounded-full font-bold shrink-0">
+                                <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                                <span>VERIFIED NGO</span>
+                              </span>
+                            </div>
 
-                    <div className="space-y-1 pt-1">
-                      <span className="text-brand-cream/50 font-mono block">GEOGRAPHIC ADRESS:</span>
-                      <p className="text-brand-cream bg-black/20 p-2 rounded border border-brand-cream/5 font-serif italic">
-                        {getFormattedLocation()}
-                      </p>
-                    </div>
+                            <p className="text-[10px] text-brand-cream/75 font-mono truncate">
+                              {user?.roleType || "AIDSTORY COMMUNITY DISPATCHER"}
+                            </p>
 
-                    <div className="flex justify-between border-t border-brand-cream/5 pt-2">
-                      <span className="text-brand-cream/50 font-mono">JOINED DATE:</span>
-                      <span className="text-brand-cream font-mono">
-                        {user?.joinedDate 
-                          ? new Date(user.joinedDate).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) 
-                          : "16 Aug 2026"}
-                      </span>
-                    </div>
+                            {/* Subscribers (Followers) Interactive Badge Button */}
+                            <div className="pt-0.5">
+                              <button
+                                type="button"
+                                onClick={() => setShowSubscribersModal(true)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-200 text-[11px] font-mono font-medium transition-all duration-200 hover:scale-105 cursor-pointer shadow-sm"
+                              >
+                                <Users className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                <span className="font-bold text-white">
+                                  {getSubscribersCount().toLocaleString()}
+                                </span>
+                                <span>Subscribers</span>
+                                <span className="text-[9px] text-emerald-300/80 underline ml-0.5">
+                                  View List →
+                                </span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
 
-                    <div className="flex justify-between border-t border-brand-cream/5 pt-2">
-                      <span className="text-brand-cream/50 font-mono">JOURNEY DURATION:</span>
-                      <span className="font-bold text-brand-olive font-mono">{getDaysOfJourney()} {getDaysOfJourney() === 1 ? "Day" : "Days"}</span>
-                    </div>
+                        {/* NGO & Charity Description / Mission Section */}
+                        <div className="bg-black/25 border border-brand-cream/10 rounded-2xl p-3.5 space-y-1.5 flex-grow">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[9px] font-mono text-brand-cream/50 uppercase tracking-wide">
+                              CHARITY & NGO MISSION / FOCUS
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleStartEditingProfile}
+                              className="text-[10px] font-mono text-brand-olive hover:underline cursor-pointer"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                          <p className="text-xs text-brand-cream/90 font-serif italic leading-relaxed bg-black/20 p-2.5 rounded-xl border border-brand-cream/5">
+                            "{user?.description || "Dedicated to emergency flood relief, transparent in-kind food distribution, and urgent community supply dispatching across regional hubs."}"
+                          </p>
+                        </div>
 
-                    <div className="flex justify-between border-t border-brand-cream/5 pt-2 text-[10px] text-brand-olive font-mono">
-                      <span>ROLE TYPE: {user ? "AIDSTORY COMMUNITY DISPATCHER" : "GUEST VISITOR"}</span>
-                      <span>ACTIVE: YES</span>
+                        {/* Official Social Channels (Instagram & Facebook Clickable Links) */}
+                        <div className="space-y-1.5">
+                          <span className="text-[9px] font-mono text-brand-cream/50 uppercase tracking-wide block">
+                            OFFICIAL SOCIAL CHANNELS (CLICK TO VISIT)
+                          </span>
+
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            {/* Instagram Page Link */}
+                            <a
+                              href={`https://instagram.com/${user?.instagram || "ngo1_aidstory"}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-2.5 rounded-xl bg-gradient-to-br from-purple-950/40 via-pink-950/40 to-amber-950/30 hover:from-purple-900/50 hover:via-pink-900/50 hover:to-amber-900/40 border border-pink-500/30 hover:border-pink-400/60 transition-all duration-200 flex items-center justify-between group cursor-pointer shadow-md text-left"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-yellow-500 via-pink-500 to-purple-600 text-white flex items-center justify-center shrink-0 shadow">
+                                  <Instagram className="w-3.5 h-3.5" />
+                                </div>
+                                <div className="overflow-hidden min-w-0">
+                                  <span className="block text-[11px] font-bold text-pink-200 group-hover:text-pink-100 truncate">
+                                    @{user?.instagram || "ngo1_aidstory"}
+                                  </span>
+                                  <span className="block text-[8px] font-mono text-brand-cream/50">
+                                    Instagram
+                                  </span>
+                                </div>
+                              </div>
+                              <ExternalLink className="w-3 h-3 text-pink-400/60 group-hover:text-pink-300 group-hover:translate-x-0.5 transition-all shrink-0 ml-1" />
+                            </a>
+
+                            {/* Facebook Page Link */}
+                            <a
+                              href={`https://facebook.com/${user?.facebook || "ngo1relief"}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-2.5 rounded-xl bg-gradient-to-br from-blue-950/40 to-indigo-950/40 hover:from-blue-900/50 hover:to-indigo-900/50 border border-blue-500/30 hover:border-blue-400/60 transition-all duration-200 flex items-center justify-between group cursor-pointer shadow-md text-left"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <div className="w-7 h-7 rounded-lg bg-[#1877F2] text-white flex items-center justify-center shrink-0 shadow">
+                                  <Facebook className="w-3.5 h-3.5 fill-current" />
+                                </div>
+                                <div className="overflow-hidden min-w-0">
+                                  <span className="block text-[11px] font-bold text-blue-200 group-hover:text-blue-100 truncate">
+                                    fb.com/{user?.facebook || "ngo1relief"}
+                                  </span>
+                                  <span className="block text-[8px] font-mono text-brand-cream/50">
+                                    Facebook
+                                  </span>
+                                </div>
+                              </div>
+                              <ExternalLink className="w-3 h-3 text-blue-400/60 group-hover:text-blue-300 group-hover:translate-x-0.5 transition-all shrink-0 ml-1" />
+                            </a>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* RIGHT COLUMN: Account Specifications & Geographic Hub Card */}
+                      <div className="lg:col-span-7 space-y-3 flex flex-col justify-between">
+                        {/* Main Account Details Card */}
+                        <div className="flex flex-grow flex-col justify-between space-y-2.5 rounded-2xl border border-brand-cream/10 bg-black/25 p-3 font-sans text-xs sm:p-4">
+                          <div>
+                            <div className="flex flex-col items-start gap-2 border-b border-brand-cream/10 pb-2 mb-2 sm:flex-row sm:items-center sm:justify-between">
+                              <span className="flex text-[10px] font-mono font-bold uppercase tracking-wider text-brand-olive gap-1.5">
+                                <ShieldCheck className="w-3.5 h-3.5" />
+                                <span>Verified Organization Credentials</span>
+                              </span>
+                              <span className="max-w-full break-all text-[9px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full">
+                                ID: DISPATCH-{user?.username || "NGO01"}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2.5">
+                              <div className="flex justify-between sm:flex-col sm:items-start gap-1 p-2 rounded-lg bg-black/15 border border-white/5">
+                                <span className="text-brand-cream/50 font-mono text-[10px]">USERNAME</span>
+                                <span className="font-bold text-brand-cream text-xs">{user ? user.username : "NGO01"}</span>
+                              </div>
+
+                              <div className="flex justify-between sm:flex-col sm:items-start gap-1 p-2 rounded-lg bg-black/15 border border-white/5">
+                                <span className="text-brand-cream/50 font-mono text-[10px]">EMAIL ADDRESS</span>
+                                <span className="text-brand-cream text-xs truncate max-w-[180px]" title={user?.email || "ngo1@gmail.com"}>
+                                  {user ? user.email : "ngo1@gmail.com"}
+                                </span>
+                              </div>
+
+                              <div className="flex justify-between sm:flex-col sm:items-start gap-1 p-2 rounded-lg bg-black/15 border border-white/5">
+                                <span className="text-brand-cream/50 font-mono text-[10px]">CONTACT PHONE</span>
+                                <span className="text-brand-cream font-mono text-xs">{user ? user.contact : "+60 33-7894561"}</span>
+                              </div>
+
+                              <div className="flex justify-between sm:flex-col sm:items-start gap-1 p-2 rounded-lg bg-black/15 border border-white/5">
+                                <span className="text-brand-cream/50 font-mono text-[10px]">JOINED DATE</span>
+                                <span className="text-brand-cream font-mono text-xs">
+                                  {user?.joinedDate 
+                                    ? new Date(user.joinedDate).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) 
+                                    : "16 Aug 2026"}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="space-y-1 pt-2.5 mt-2.5 border-t border-brand-cream/10">
+                              <span className="text-brand-cream/50 font-mono text-[10px] flex items-center gap-1">
+                                <MapPin className="w-3 h-3 text-amber-400" />
+                                <span>GEOGRAPHIC HUB & DISTRIBUTION ADDRESS</span>
+                              </span>
+                              <p className="text-brand-cream bg-black/30 p-2.5 rounded-xl border border-brand-cream/10 font-serif italic text-xs leading-relaxed">
+                                {getFormattedLocation()}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 gap-2 border-t border-brand-cream/10 pt-2.5 text-center text-[10px] font-mono sm:grid-cols-3">
+                            <div className="p-2 bg-black/20 rounded-xl border border-white/5">
+                              <span className="block text-brand-cream/50 text-[9px]">JOURNEY</span>
+                              <span className="font-bold text-brand-olive">{getDaysOfJourney()} {getDaysOfJourney() === 1 ? "Day" : "Days"}</span>
+                            </div>
+                            <div className="p-2 bg-black/20 rounded-xl border border-white/5">
+                              <span className="block text-brand-cream/50 text-[9px]">STATUS</span>
+                              <span className="font-bold text-emerald-300">ACTIVE HUB</span>
+                            </div>
+                            <div className="p-2 bg-black/20 rounded-xl border border-white/5">
+                              <span className="block text-brand-cream/50 text-[9px]">PLEDGES</span>
+                              <span className="font-bold text-yellow-300">{getCompletedDonationsCount()} Done</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    /* ==================================================== */
+                    /* EDIT MODE FORM (HORIZONTAL TWO-COLUMN LAYOUT) */
+                    /* ==================================================== */
+                    <form onSubmit={handleSaveProfile} className="space-y-4 font-sans text-xs pt-1">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4.5">
+                        {/* LEFT EDIT COLUMN */}
+                        <div className="space-y-3.5">
+                          {/* Photo Upload in Edit Mode */}
+                          <div className="bg-black/30 border border-brand-cream/15 rounded-2xl p-3.5 flex items-center gap-3.5">
+                            <div className="w-16 h-16 rounded-full overflow-hidden border-2 border-brand-olive bg-black/50 shrink-0 flex items-center justify-center">
+                              {editAvatarUrl ? (
+                                <img
+                                  src={editAvatarUrl}
+                                  alt="Preview"
+                                  className="w-full h-full object-cover"
+                                  referrerPolicy="no-referrer"
+                                />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center bg-stone-800 text-lg font-serif text-brand-cream font-bold">
+                                  {editUsername ? editUsername.substring(0, 2).toUpperCase() : "NG"}
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="space-y-1.5 flex-grow">
+                              <label className="text-[10px] font-mono text-brand-cream/70 uppercase block">
+                                Profile Photo / Avatar
+                              </label>
+                              <div className="flex items-center gap-2">
+                                <label className="px-3 py-1.5 bg-brand-olive hover:bg-[#ffee1a] text-brand-dark rounded-full font-bold text-xs uppercase tracking-wide cursor-pointer transition-colors flex items-center gap-1.5">
+                                  <Camera className="w-3.5 h-3.5" />
+                                  <span>Upload</span>
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    onChange={handlePhotoUpload}
+                                    className="hidden"
+                                  />
+                                </label>
+                                {editAvatarUrl && (
+                                  <button
+                                    type="button"
+                                    onClick={handleRemovePhoto}
+                                    className="px-2.5 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 rounded-full text-[11px] font-mono transition-colors cursor-pointer"
+                                  >
+                                    Remove
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Username */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-mono text-brand-cream/70 uppercase">
+                              Username / Organisation Name *
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              value={editUsername}
+                              onChange={(e) => setEditUsername(e.target.value)}
+                              placeholder="e.g. NGO01"
+                              className="w-full bg-[#24352b] border border-brand-cream/15 rounded-xl px-3 py-2 text-xs text-brand-cream focus:outline-none focus:border-brand-olive"
+                            />
+                          </div>
+
+                          {/* Role / Affiliation */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-mono text-brand-cream/70 uppercase">
+                              Role / Affiliation
+                            </label>
+                            <select
+                              value={editRoleType}
+                              onChange={(e) => setEditRoleType(e.target.value)}
+                              className="w-full bg-[#24352b] border border-brand-cream/15 rounded-xl px-3 py-2 text-xs text-brand-cream focus:outline-none focus:border-brand-olive"
+                            >
+                              <option value="AIDSTORY COMMUNITY DISPATCHER">AIDSTORY COMMUNITY DISPATCHER</option>
+                              <option value="REGISTERED CHARITY / NGO">REGISTERED CHARITY / NGO</option>
+                              <option value="VERIFIED RELIEF COORDINATOR">VERIFIED RELIEF COORDINATOR</option>
+                              <option value="COMMUNITY AID VOLUNTEER">COMMUNITY AID VOLUNTEER</option>
+                            </select>
+                          </div>
+
+                          {/* Social Handles */}
+                          <div className="grid grid-cols-2 gap-2.5">
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-mono text-brand-cream/70 uppercase flex items-center gap-1">
+                                <Instagram className="w-3 h-3 text-pink-400" />
+                                <span>Instagram</span>
+                              </label>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-2 text-xs font-mono text-brand-cream/40">@</span>
+                                <input
+                                  type="text"
+                                  value={editInstagram}
+                                  onChange={(e) => setEditInstagram(e.target.value)}
+                                  placeholder="ngo1_aidstory"
+                                  className="w-full bg-[#24352b] border border-brand-cream/15 rounded-xl pl-6 pr-2.5 py-2 text-xs text-brand-cream focus:outline-none focus:border-brand-olive"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-mono text-brand-cream/70 uppercase flex items-center gap-1">
+                                <Facebook className="w-3 h-3 text-blue-400" />
+                                <span>Facebook</span>
+                              </label>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-2 text-xs font-mono text-brand-cream/40">fb.com/</span>
+                                <input
+                                  type="text"
+                                  value={editFacebook}
+                                  onChange={(e) => setEditFacebook(e.target.value)}
+                                  placeholder="ngo1relief"
+                                  className="w-full bg-[#24352b] border border-brand-cream/15 rounded-xl pl-14 pr-2.5 py-2 text-xs text-brand-cream focus:outline-none focus:border-brand-olive"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* RIGHT EDIT COLUMN */}
+                        <div className="space-y-3.5">
+                          {/* Email & Contact */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-mono text-brand-cream/70 uppercase">
+                                Email Address *
+                              </label>
+                              <input
+                                type="email"
+                                required
+                                value={editEmail}
+                                onChange={(e) => setEditEmail(e.target.value)}
+                                placeholder="ngo1@gmail.com"
+                                className="w-full bg-[#24352b] border border-brand-cream/15 rounded-xl px-3 py-2 text-xs text-brand-cream focus:outline-none focus:border-brand-olive"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-mono text-brand-cream/70 uppercase">
+                                Contact Number *
+                              </label>
+                              <div className="flex gap-1.5">
+                                <input
+                                  type="text"
+                                  inputMode="tel"
+                                  value={editContactPrefix}
+                                  onChange={(e) => setEditContactPrefix(e.target.value.replace(/[^\d+]/g, ""))}
+                                  placeholder="+60"
+                                  className="w-16 text-center bg-[#24352b] border border-brand-cream/15 rounded-xl px-1.5 py-2 text-xs text-brand-cream focus:outline-none focus:border-brand-olive font-mono"
+                                />
+                                <input
+                                  type="text"
+                                  required
+                                  inputMode="numeric"
+                                  pattern="[0-9]{7,11}"
+                                  maxLength={11}
+                                  value={editContactNumber}
+                                  onChange={(e) => setEditContactNumber(e.target.value.replace(/\D/g, ""))}
+                                  placeholder="337894561"
+                                  className="flex-grow bg-[#24352b] border border-brand-cream/15 rounded-xl px-3 py-2 text-xs text-brand-cream focus:outline-none focus:border-brand-olive font-mono"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Geographic Address */}
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-mono text-brand-cream/70 uppercase block">
+                              Hub Address & Region
+                            </label>
+                            <input
+                              type="text"
+                              value={editAddress}
+                              onChange={(e) => setEditAddress(e.target.value)}
+                              placeholder="Street Address (e.g. No 1, Taman Bukit Bintang 1)"
+                              className="w-full bg-[#24352b] border border-brand-cream/15 rounded-xl px-3 py-2 text-xs text-brand-cream focus:outline-none focus:border-brand-olive"
+                            />
+                            <div className="grid grid-cols-3 gap-2">
+                              <input
+                                type="text"
+                                value={editPostcode}
+                                onChange={(e) => setEditPostcode(e.target.value)}
+                                placeholder="Postcode"
+                                className="w-full bg-[#24352b] border border-brand-cream/15 rounded-xl px-2 py-1.5 text-xs text-brand-cream focus:outline-none focus:border-brand-olive"
+                              />
+                              <input
+                                type="text"
+                                value={editState}
+                                onChange={(e) => setEditState(e.target.value)}
+                                placeholder="State"
+                                className="w-full bg-[#24352b] border border-brand-cream/15 rounded-xl px-2 py-1.5 text-xs text-brand-cream focus:outline-none focus:border-brand-olive"
+                              />
+                              <input
+                                type="text"
+                                value={editCountry}
+                                onChange={(e) => setEditCountry(e.target.value)}
+                                placeholder="Country"
+                                className="w-full bg-[#24352b] border border-brand-cream/15 rounded-xl px-2 py-1.5 text-xs text-brand-cream focus:outline-none focus:border-brand-olive"
+                              />
+                            </div>
+                          </div>
+
+                          {/* NGO Description / Mission Textarea */}
+                          <div className="space-y-1">
+                            <div className="flex justify-between items-center">
+                              <label className="text-[10px] font-mono text-brand-cream/70 uppercase">
+                                Charity / NGO Description & Mission
+                              </label>
+                              <span className="text-[9px] font-mono text-brand-cream/40">
+                                {editDescription.length}/350 chars
+                              </span>
+                            </div>
+                            <textarea
+                              rows={3}
+                              maxLength={350}
+                              value={editDescription}
+                              onChange={(e) => setEditDescription(e.target.value)}
+                              placeholder="Describe your charity's focus, beneficiaries, relief distribution hubs, and accepted supplies..."
+                              className="w-full bg-[#24352b] border border-brand-cream/15 rounded-xl p-2.5 text-xs text-brand-cream focus:outline-none focus:border-brand-olive placeholder:text-brand-cream/35 leading-relaxed"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Submit / Cancel Buttons */}
+                      <div className="flex items-center gap-2.5 pt-2 border-t border-brand-cream/10">
+                        <button
+                          type="submit"
+                          className="flex-grow py-3 bg-brand-olive hover:bg-[#ffee1a] text-brand-dark rounded-full font-bold text-xs uppercase tracking-wider transition-all duration-200 shadow-md cursor-pointer flex items-center justify-center gap-1.5"
+                        >
+                          <Save className="w-4 h-4" />
+                          <span>Save Profile Changes</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsEditingProfile(false)}
+                          className="px-6 py-3 bg-white/10 hover:bg-white/15 text-brand-cream rounded-full text-xs font-mono transition-colors cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  )}
                 </div>
               )}
 
@@ -2441,7 +3715,7 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
 
               {/* APPLICATION MANUAL APPROVAL MODAL (ADMIN ONLY) */}
               {activeTab === "application" && isAdmin && (
-                <div className="space-y-4 text-left">
+                <div className="max-w-5xl mx-auto pt-14 space-y-5 text-left">
                   <div className="flex items-center justify-between border-b border-brand-cream/10 pb-3">
                     <div className="flex items-center gap-2">
                       <FileText className="w-5 h-5 text-brand-olive" />
@@ -2490,7 +3764,7 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                   </div>
 
                   {/* Applications List */}
-                  <div className="space-y-3 max-h-[380px] overflow-y-auto pr-1 pt-1">
+                  <div className="space-y-3 max-h-[calc(100vh-250px)] overflow-y-auto pr-1 pt-1">
                     {recipientApplications.filter(
                       (app) => appFilterStatus === "All" || app.status === appFilterStatus
                     ).length === 0 ? (
@@ -2727,11 +4001,14 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                     <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
                       {ALL_VERIFIED_REQUESTERS.map((org) => {
                         const isSubbed = subscribedRequesters.includes(org.name);
+                        const isSelf = isSameAsCurrentUser(org.name);
                         return (
                           <div
                             key={org.name}
                             className={`p-3 rounded-xl border transition-all flex items-center justify-between gap-3 ${
-                              isSubbed
+                              isSelf
+                                ? "bg-amber-950/40 border-amber-500/40"
+                                : isSubbed
                                 ? "bg-amber-950/25 border-yellow-400/35 shadow-sm"
                                 : "bg-black/20 border-brand-cream/10 hover:border-brand-cream/20"
                             }`}
@@ -2749,27 +4026,33 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                               </div>
                             </div>
 
-                            <button
-                              type="button"
-                              onClick={() => handleToggleRequesterSubscription(org.name)}
-                              className={`px-3 py-1 rounded-full text-[10px] font-mono font-bold transition-all cursor-pointer shrink-0 flex items-center gap-1 ${
-                                isSubbed
-                                  ? "bg-yellow-400 text-[#2c221a] hover:bg-yellow-300 shadow"
-                                  : "bg-white/10 hover:bg-white/20 text-brand-cream border border-brand-cream/20"
-                              }`}
-                            >
-                              {isSubbed ? (
-                                <>
-                                  <Check className="w-3 h-3 stroke-[3]" />
-                                  <span>Subscribed</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Plus className="w-3 h-3" />
-                                  <span>Subscribe</span>
-                                </>
-                              )}
-                            </button>
+                            {isSelf ? (
+                              <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0">
+                                You
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleToggleRequesterSubscription(org.name)}
+                                className={`px-3 py-1 rounded-full text-[10px] font-mono font-bold transition-all cursor-pointer shrink-0 flex items-center gap-1 ${
+                                  isSubbed
+                                    ? "bg-yellow-400 text-[#2c221a] hover:bg-yellow-300 shadow"
+                                    : "bg-white/10 hover:bg-white/20 text-brand-cream border border-brand-cream/20"
+                                }`}
+                              >
+                                {isSubbed ? (
+                                  <>
+                                    <Check className="w-3 h-3 stroke-[3]" />
+                                    <span>Subscribed</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Plus className="w-3 h-3" />
+                                    <span>Subscribe</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
                           </div>
                         );
                       })}
@@ -2791,7 +4074,7 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
               )}
 
             </motion.div>
-          </div>
+          </motion.div>
         )}
 
         {/* FULLSCREEN CUSTOM APPLY AS PAGE (matching the screenshot exactly) */}
@@ -2927,7 +4210,13 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
             {/* INTERACTIVE FORM DIALOG OVERLAYS */}
             <AnimatePresence>
               {applyFormType && (
-                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+                <motion.div 
+                  key={`main-menu-apply-modal-${applyFormType}`}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+                >
                   {/* Backdrop */}
                   <motion.div
                     initial={{ opacity: 0 }}
@@ -3104,9 +4393,12 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                               <input
                                 type="tel"
                                 required
+                                inputMode="numeric"
+                                pattern="[0-9]{7,15}"
+                                maxLength={15}
                                 value={recipientPhone}
-                                onChange={(e) => setRecipientPhone(e.target.value)}
-                                placeholder="e.g. +60 12-3456789"
+                                onChange={(e) => setRecipientPhone(e.target.value.replace(/\D/g, ""))}
+                                placeholder="e.g. 60123456789"
                                 className="w-full bg-[#24352b] border border-[#f4efe5]/15 rounded-lg px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-[#82afa6]"
                               />
                             </div>
@@ -3206,9 +4498,12 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                               <input
                                 type="tel"
                                 required
+                                inputMode="numeric"
+                                pattern="[0-9]{7,15}"
+                                maxLength={15}
                                 value={volPhone}
-                                onChange={(e) => setVolPhone(e.target.value)}
-                                placeholder="e.g. +60 12-3456789"
+                                onChange={(e) => setVolPhone(e.target.value.replace(/\D/g, ""))}
+                                placeholder="e.g. 60123456789"
                                 className="w-full bg-[#24352b] border border-[#f4efe5]/15 rounded-lg px-3.5 py-2 text-xs text-[#f4efe5] focus:outline-none focus:border-[#82afa6]"
                               />
                             </div>
@@ -3237,7 +4532,7 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                     )}
 
                   </motion.div>
-                </div>
+                </motion.div>
               )}
             </AnimatePresence>
 
@@ -3245,16 +4540,22 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
         )}
       </AnimatePresence>
 
-      {/* LOCKED POST REQUEST POPUP OVERLAY */}
-      <AnimatePresence>
-        {isPostLockedModalOpen && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            {/* Modal Backdrop */}
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsPostLockedModalOpen(false)}
+    {/* LOCKED POST REQUEST POPUP OVERLAY */}
+    <AnimatePresence>
+      {isPostLockedModalOpen && (
+        <motion.div 
+          key="main-menu-postlocked-modal"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+        >
+          {/* Modal Backdrop */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsPostLockedModalOpen(false)}
               className="absolute inset-0 bg-black/65 backdrop-blur-sm"
             />
 
@@ -3303,34 +4604,95 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                 </svg>
               </div>
 
-              {/* Title & Subtitle matching image.png */}
+              {/* Title & Subtitle */}
               <h3 className="text-2xl md:text-3xl font-serif text-[#f4efe5] font-medium tracking-tight mb-2">
                 Locked.
               </h3>
               <p className="text-sm md:text-base text-[#f4efe5]/85 font-sans mb-6 leading-relaxed">
-                Verify as recipient to unlock it.
+                {lockedModalReason === "auth"
+                  ? "Login or sign up to unlock request posting."
+                  : lockedModalReason === "pending_ngo"
+                  ? "Your NGO verification is currently pending admin audit. Request posting will be unlocked once approved."
+                  : lockedModalReason === "donor_only"
+                  ? "Your account is registered as Donor Only. To post community item requests, please apply and verify as a recipient."
+                  : "Verify as recipient or NGO to unlock item requests."}
               </p>
 
               {/* Action Button */}
-              <button
-                onClick={() => {
-                  setIsPostLockedModalOpen(false);
-                  setActiveTab("apply");
-                  setApplyFormType("recipient");
-                }}
-                className="w-full sm:w-auto px-9 py-3 bg-[#ff5500] hover:bg-[#ff6600] text-white font-bold text-sm md:text-base rounded-full shadow-lg hover:scale-[1.03] active:scale-[0.98] transition-all cursor-pointer mx-auto block"
-              >
-                Apply Now
-              </button>
+              {lockedModalReason === "auth" ? (
+                <button
+                  onClick={() => {
+                    setIsPostLockedModalOpen(false);
+                    navigateToView("home");
+                  }}
+                  className="w-full sm:w-auto px-9 py-3 bg-[#ff5500] hover:bg-[#ff6600] text-white font-bold text-sm md:text-base rounded-full shadow-lg hover:scale-[1.03] active:scale-[0.98] transition-all cursor-pointer mx-auto block"
+                >
+                  Login / Sign Up
+                </button>
+              ) : lockedModalReason === "pending_ngo" ? (
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                  <button
+                    onClick={() => {
+                      setIsPostLockedModalOpen(false);
+                      setActiveTab("apply");
+                    }}
+                    className="w-full sm:w-auto px-7 py-3 bg-[#82afa6] hover:bg-[#92bfa6] text-white font-bold text-sm rounded-full shadow-lg hover:scale-[1.03] active:scale-[0.98] transition-all cursor-pointer"
+                  >
+                    View Application Status
+                  </button>
+                  <button
+                    onClick={() => setIsPostLockedModalOpen(false)}
+                    className="w-full sm:w-auto px-7 py-3 bg-black/40 hover:bg-black/60 text-[#f4efe5] text-sm font-semibold rounded-full border border-[#f4efe5]/20 cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              ) : lockedModalReason === "donor_only" ? (
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                  <button
+                    onClick={() => {
+                      setIsPostLockedModalOpen(false);
+                      setActiveTab("apply");
+                      setApplyFormType("recipient");
+                    }}
+                    className="w-full sm:w-auto px-7 py-3 bg-[#ff5500] hover:bg-[#ff6600] text-white font-bold text-sm rounded-full shadow-lg hover:scale-[1.03] active:scale-[0.98] transition-all cursor-pointer"
+                  >
+                    Apply As Recipient
+                  </button>
+                  <button
+                    onClick={() => setIsPostLockedModalOpen(false)}
+                    className="w-full sm:w-auto px-7 py-3 bg-black/40 hover:bg-black/60 text-[#f4efe5] text-sm font-semibold rounded-full border border-[#f4efe5]/20 cursor-pointer"
+                  >
+                    Stay as Donor
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    setIsPostLockedModalOpen(false);
+                    setActiveTab("apply");
+                    setApplyFormType("recipient");
+                  }}
+                  className="w-full sm:w-auto px-9 py-3 bg-[#ff5500] hover:bg-[#ff6600] text-white font-bold text-sm md:text-base rounded-full shadow-lg hover:scale-[1.03] active:scale-[0.98] transition-all cursor-pointer mx-auto block"
+                >
+                  Apply Now
+                </button>
+              )}
             </motion.div>
-          </div>
+          </motion.div>
         )}
       </AnimatePresence>
 
       {/* MANAGE SUBSCRIBED REQUESTERS MODAL */}
       <AnimatePresence>
         {showManageSubscriptionsModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <motion.div 
+            key="main-menu-manage-subscriptions-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          >
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -3384,11 +4746,14 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                 <div className="space-y-3 max-h-[380px] overflow-y-auto pr-1">
                   {ALL_VERIFIED_REQUESTERS.map((org) => {
                     const isSubbed = subscribedRequesters.includes(org.name);
+                    const isSelf = isSameAsCurrentUser(org.name);
                     return (
                       <div
                         key={org.name}
                         className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
-                          isSubbed
+                          isSelf
+                            ? "bg-amber-950/40 border-amber-500/40"
+                            : isSubbed
                             ? "bg-amber-950/20 border-yellow-400/40 shadow-sm"
                             : "bg-black/25 border-brand-cream/10 hover:border-brand-cream/20"
                         }`}
@@ -3411,27 +4776,33 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                           </div>
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => handleToggleRequesterSubscription(org.name)}
-                          className={`px-3.5 py-1.5 rounded-full text-[11px] font-mono font-bold transition-all cursor-pointer shrink-0 flex items-center gap-1 ${
-                            isSubbed
-                              ? "bg-yellow-400 text-[#2c221a] hover:bg-yellow-300 shadow"
-                              : "bg-white/10 hover:bg-white/20 text-brand-cream border border-brand-cream/20"
-                          }`}
-                        >
-                          {isSubbed ? (
-                            <>
-                              <Check className="w-3.5 h-3.5 stroke-[3]" />
-                              <span>Subscribed</span>
-                            </>
-                          ) : (
-                            <>
-                              <Plus className="w-3.5 h-3.5" />
-                              <span>Subscribe</span>
-                            </>
-                          )}
-                        </button>
+                        {isSelf ? (
+                          <span className="px-3.5 py-1.5 rounded-full text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0">
+                            You
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleRequesterSubscription(org.name)}
+                            className={`px-3.5 py-1.5 rounded-full text-[11px] font-mono font-bold transition-all cursor-pointer shrink-0 flex items-center gap-1 ${
+                              isSubbed
+                                ? "bg-yellow-400 text-[#2c221a] hover:bg-yellow-300 shadow"
+                                : "bg-white/10 hover:bg-white/20 text-brand-cream border border-brand-cream/20"
+                            }`}
+                          >
+                            {isSubbed ? (
+                              <>
+                                <Check className="w-3.5 h-3.5 stroke-[3]" />
+                                <span>Subscribed</span>
+                              </>
+                            ) : (
+                              <>
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>Subscribe</span>
+                              </>
+                            )}
+                          </button>
+                        )}
                       </div>
                     );
                   })}
@@ -3447,7 +4818,123 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
                 </div>
               </div>
             </motion.div>
-          </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* INTERACTIVE SUBSCRIBERS / FOLLOWERS DIRECTORY MODAL */}
+      <AnimatePresence>
+        {showSubscribersModal && (
+          <motion.div
+            key="main-menu-subscribers-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 z-[95] flex items-center justify-center p-4 backdrop-blur-xs"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-[#284234] border border-brand-cream/20 rounded-3xl p-5 sm:p-6 w-full max-w-lg text-brand-cream shadow-2xl text-left max-h-[85vh] flex flex-col"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-brand-cream/10 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center justify-center border border-emerald-500/30">
+                    <Users className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-serif font-bold text-brand-cream">
+                      Subscribers & Followers Directory
+                    </h3>
+                    <p className="text-[10px] text-emerald-300 font-mono">
+                      {getSubscribersCount().toLocaleString()} Active Community Donors & Supporters
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowSubscribersModal(false)}
+                  className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-brand-cream flex items-center justify-center transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Description */}
+              <div className="py-2.5 text-xs text-brand-cream/80 leading-relaxed font-sans">
+                These donors and community volunteers receive instant dispatch notifications whenever{" "}
+                <span className="font-bold text-brand-olive">{user ? user.username : "NGO01"}</span> posts an in-kind aid campaign or urgent supply request.
+              </div>
+
+              {/* Search input */}
+              <div className="pb-2">
+                <input
+                  type="text"
+                  value={subscribersSearchQuery}
+                  onChange={(e) => setSubscribersSearchQuery(e.target.value)}
+                  placeholder="Search subscribers by name, location or role..."
+                  className="w-full bg-[#1e3328] border border-brand-cream/15 rounded-xl px-3.5 py-2 text-xs text-brand-cream placeholder:text-brand-cream/40 focus:outline-none focus:border-brand-olive"
+                />
+              </div>
+
+              {/* Subscribers List */}
+              <div className="flex-grow overflow-y-auto space-y-2 pr-1 custom-scrollbar my-2 max-h-[300px]">
+                {MOCK_PROFILE_SUBSCRIBERS
+                  .filter((s) =>
+                    !subscribersSearchQuery.trim() ||
+                    s.name.toLowerCase().includes(subscribersSearchQuery.toLowerCase()) ||
+                    s.location.toLowerCase().includes(subscribersSearchQuery.toLowerCase()) ||
+                    s.role.toLowerCase().includes(subscribersSearchQuery.toLowerCase())
+                  )
+                  .map((sub) => (
+                    <div
+                      key={sub.id}
+                      className="bg-black/25 hover:bg-black/35 border border-brand-cream/10 rounded-2xl p-3 flex items-center justify-between gap-3 transition-colors"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-brand-cream/10 border border-brand-cream/20 flex items-center justify-center text-lg shrink-0">
+                          {sub.avatar}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-bold text-brand-cream">{sub.name}</span>
+                            <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.2 rounded-full font-mono">
+                              Active Supporter
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-brand-cream/60 font-mono">
+                            {sub.role} • {sub.location}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <span className="text-[9px] font-mono text-brand-cream/40 block">
+                          Joined {sub.joined}
+                        </span>
+                        <span className="text-[9px] text-brand-olive font-mono">
+                          ✓ Push Alerts On
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+
+              {/* Bottom stats summary */}
+              <div className="pt-3 border-t border-brand-cream/10 flex items-center justify-between text-[11px] font-mono text-brand-cream/60">
+                <span>Total Reach: {getSubscribersCount().toLocaleString()} supporters</span>
+                <button
+                  type="button"
+                  onClick={() => setShowSubscribersModal(false)}
+                  className="px-4 py-1.5 bg-brand-olive text-brand-dark hover:bg-[#ffee1a] rounded-full font-bold text-xs transition-colors cursor-pointer"
+                >
+                  Close Directory
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
 
@@ -3545,12 +5032,77 @@ export default function AppMainMenu({ navigateToView }: AppMainMenuProps) {
         {selectedDetailRequest && (
           <RequestDetailModal
             request={selectedDetailRequest}
+            isOpen={Boolean(selectedDetailRequest)}
             onClose={() => setSelectedDetailRequest(null)}
-            onPledge={handlePledgeNeed}
-            isPledged={pledgedItems.includes(selectedDetailRequest.title)}
-            onNavigate={(viewId) => {
+            onAddToDonateBox={(req) => {
+              let currentCart: any[] = [];
+              try {
+                const saved = localStorage.getItem("aidstory_donate_box_cart");
+                if (saved) currentCart = JSON.parse(saved);
+              } catch (e) {}
+              const remainingNeed = Math.max(1, req.quantity - (req.pledgedQuantity || 0));
+              const existingIdx = currentCart.findIndex((i) => i.requestId === req.id);
+              if (existingIdx > -1) {
+                currentCart[existingIdx].quantity = Math.min(remainingNeed, (currentCart[existingIdx].quantity || 1) + 1);
+              } else {
+                currentCart.push({
+                  id: `box_item_${Date.now()}`,
+                  requestId: req.id,
+                  title: req.title,
+                  category: req.category,
+                  imageUrl: req.imageUrl,
+                  location: req.location,
+                  unit: req.unit,
+                  quantity: 1,
+                  maxNeeded: remainingNeed,
+                  organizerName: req.organizerName || "Hope Community Aid (NGO)",
+                  brand: req.brand || "Standard",
+                  color: req.color || "Any",
+                  checked: true
+                });
+              }
+              localStorage.setItem("aidstory_donate_box_cart", JSON.stringify(currentCart));
+            }}
+            onSupportNow={(req) => {
+              let currentCart: any[] = [];
+              try {
+                const saved = localStorage.getItem("aidstory_donate_box_cart");
+                if (saved) currentCart = JSON.parse(saved);
+              } catch (e) {}
+              const remainingNeed = Math.max(1, req.quantity - (req.pledgedQuantity || 0));
+              const existingIdx = currentCart.findIndex((i) => i.requestId === req.id);
+              let updatedCart: any[] = [];
+              if (existingIdx > -1) {
+                updatedCart = currentCart.map((i, idx) => ({
+                  ...i,
+                  checked: idx === existingIdx
+                }));
+              } else {
+                const newItem = {
+                  id: `box_item_${Date.now()}`,
+                  requestId: req.id,
+                  title: req.title,
+                  category: req.category,
+                  imageUrl: req.imageUrl,
+                  location: req.location,
+                  unit: req.unit,
+                  quantity: 1,
+                  maxNeeded: remainingNeed,
+                  organizerName: req.organizerName || "Hope Community Aid (NGO)",
+                  brand: req.brand || "Standard",
+                  color: req.color || "Any",
+                  checked: true
+                };
+                updatedCart = [newItem, ...currentCart.map((i) => ({ ...i, checked: false }))];
+              }
+              localStorage.setItem("aidstory_donate_box_cart", JSON.stringify(updatedCart));
               setSelectedDetailRequest(null);
-              navigateToView(viewId);
+              navigateToView("preparing_donate_box");
+            }}
+            isInDonateBox={false}
+            onOpenDonateBoxPage={() => {
+              setSelectedDetailRequest(null);
+              navigateToView("preparing_donate_box");
             }}
           />
         )}

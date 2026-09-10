@@ -28,7 +28,7 @@ export default function AppComments({ navigateToView, feedbackList, onAddComment
     setFormEmail("");
     setFormComment("");
     
-    setNotification("Your comments and thoughts have been added locally! Thank you.");
+    setNotification("Your words of hope have been shared with the community! Thank you.");
     setTimeout(() => setNotification(null), 5000);
   };
 

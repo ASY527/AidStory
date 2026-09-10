@@ -36,3 +36,15 @@ body {
   transform: rotateY(180deg);
 }
 
+@keyframes picnic-hover-bounce {
+  0%, 100% { transform: translateY(0); }
+  45% { transform: translateY(-11px); }
+  70% { transform: translateY(-3px); }
+}
+
+/* Each picnic-menu item plays five short hops once when it is entered or focused. */
+.picnic-menu-hotspot:hover .picnic-hover-bounce,
+.picnic-menu-hotspot:focus-visible .picnic-hover-bounce {
+  animation: picnic-hover-bounce 0.42s ease-in-out 5;
+  filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.98)) drop-shadow(0 0 10px rgba(255, 255, 255, 0.8));
+}

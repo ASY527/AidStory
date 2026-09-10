@@ -1,0 +1,118 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Registered user profile with charity organization and authentication details",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "username": { "type": "string" },
+        "charityName": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "organization", "admin"] },
+        "avatarUrl": { "type": "string" },
+        "state": { "type": "string" },
+        "district": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "email", "username"]
+    },
+    "NeedRequest": {
+      "title": "NeedRequest",
+      "description": "Aid request or community campaign created by a user or verified charity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "targetQuantity": { "type": "number" },
+        "pledgedQuantity": { "type": "number" },
+        "unit": { "type": "string" },
+        "urgencyLevel": { "type": "string", "enum": ["standard", "important", "emergency"] },
+        "isCampaign": { "type": "boolean" },
+        "authorId": { "type": "string" },
+        "authorEmail": { "type": "string" },
+        "authorName": { "type": "string" },
+        "organizerName": { "type": "string" },
+        "organizerAvatar": { "type": "string" },
+        "state": { "type": "string" },
+        "district": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "status": { "type": "string", "enum": ["Active", "Fulfilled", "Closed"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "title", "category", "targetQuantity", "createdAt"]
+    },
+    "Pledge": {
+      "title": "Pledge",
+      "description": "Donation pledge committed by a donor towards a specific need or campaign",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "requestId": { "type": "string" },
+        "donorId": { "type": "string" },
+        "donorName": { "type": "string" },
+        "donorEmail": { "type": "string" },
+        "quantity": { "type": "number" },
+        "items": { "type": "string" },
+        "fulfillmentMethod": { "type": "string", "enum": ["dropoff", "delivery", "pickup"] },
+        "status": { "type": "string", "enum": ["Pending", "In Transit", "Delivered", "Cancelled"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "requestId", "quantity", "createdAt"]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "Community comment or discussion message on a need request",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "requestId": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorEmail": { "type": "string" },
+        "authorAvatar": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "requestId", "text", "createdAt"]
+    },
+    "Subscription": {
+      "title": "Subscription",
+      "description": "User notification subscription to a verified charity or requester",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "targetName": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "targetName"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profiles and credentials"
+    },
+    "/requests/{requestId}": {
+      "schema": "NeedRequest",
+      "description": "All community needs, recipient requests, and campaigns"
+    },
+    "/pledges/{pledgeId}": {
+      "schema": "Pledge",
+      "description": "Donation pledges and item commitments"
+    },
+    "/comments/{commentId}": {
+      "schema": "Comment",
+      "description": "Community comments and Q&A on requests"
+    },
+    "/subscriptions/{subId}": {
+      "schema": "Subscription",
+      "description": "User subscriptions to organizations/requesters"
+    }
+  }
+}
